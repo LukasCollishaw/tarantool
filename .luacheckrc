@@ -11,6 +11,8 @@ ignore = {
     "212/self",
     -- Redefining a local variable.
     "411",
+    -- Redefining an argument.
+    "412",
     -- Shadowing a local variable.
     "421",
     -- Shadowing an upvalue.
