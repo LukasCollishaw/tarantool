@@ -183,7 +183,7 @@ local function next_id(id) return band(id + 1, 0x7FFFFFFF) end
 -- @retval two non-nils A connected socket and a decoded greeting.
 --
 local function establish_connection(host, port, timeout)
-    timeout = timeout or DEFAULT_CONNECT_TIMEOUT
+    local timeout = timeout or DEFAULT_CONNECT_TIMEOUT
     local begin = fiber.clock()
     local s = socket.tcp_connect(host, port, timeout)
     if not s then
