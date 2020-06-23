@@ -467,8 +467,10 @@ txn_complete(struct txn *txn)
 		 * back to the fiber, owning the transaction so as
 		 * it could decide what to do next.
 		 */
-		if (txn->fiber != NULL && txn->fiber != fiber())
+		if (txn->fiber != NULL && txn->fiber != fiber()) {
 			fiber_wakeup(txn->fiber);
+			txn->fiber = NULL;
+		}
 		return;
 	}
 	/*
@@ -780,6 +782,7 @@ txn_commit(struct txn *txn)
 	if (is_sync) {
 		txn_limbo_assign_lsn(&txn_limbo, limbo_entry,
 				     req->rows[req->n_rows - 1]->lsn);
+		txn->fiber = fiber();
 		if (txn_limbo_wait_complete(&txn_limbo, limbo_entry) < 0) {
 			txn_free(txn);
 			return -1;
