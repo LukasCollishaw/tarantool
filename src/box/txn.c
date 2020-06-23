@@ -667,48 +667,32 @@ txn_commit_async(struct txn *txn)
 	bool is_sync = txn_has_flag(txn, TXN_WAIT_ACK);
 	struct txn_limbo_entry *limbo_entry;
 	if (is_sync) {
+		/*
+		 * We'll need this trigger for sync transactions later,
+		 * but allocation failure is inappropriate after the entry
+		 * is sent to journal, so allocate early.
+		 */
+		size_t size;
+		struct trigger *trig =
+			region_alloc_object(&txn->region, typeof(*trig), &size);
+		if (trig == NULL) {
+			txn_rollback(txn);
+			diag_set(OutOfMemory, size, "region_alloc_object",
+				 "trig");
+			return -1;
+		}
+
 		/* See txn_commit(). */
 		uint32_t origin_id = req->rows[0]->replica_id;
 		int64_t lsn = req->rows[txn->n_applier_rows - 1]->lsn;
 		limbo_entry = txn_limbo_append(&txn_limbo, origin_id, txn);
 		if (limbo_entry == NULL) {
 			txn_rollback(txn);
-			txn_free(txn);
 			return -1;
 		}
 		assert(lsn > 0);
 		txn_limbo_assign_lsn(&txn_limbo, limbo_entry, lsn);
-	}
 
-	/*
-	 * We'll need this trigger for sync transactions later,
-	 * but allocation failure is inappropriate after the entry
-	 * is sent to journal, so allocate early.
-	 */
-	struct trigger *trig;
-	if (is_sync) {
-		size_t size;
-		trig = region_alloc_object(&txn->region, typeof(*trig), &size);
-		if (trig == NULL) {
-			diag_set(OutOfMemory, size, "region_alloc_object",
-				 "trig");
-			return -1;
-		}
-	}
-
-	fiber_set_txn(fiber(), NULL);
-	if (journal_write_async(req) != 0) {
-		fiber_set_txn(fiber(), txn);
-		txn_rollback(txn);
-		if (is_sync)
-			txn_limbo_abort(&txn_limbo, limbo_entry);
-
-		diag_set(ClientError, ER_WAL_IO);
-		diag_log();
-		return -1;
-	}
-
-	if (is_sync) {
 		/*
 		 * Set a trigger to abort waiting for confirm on
 		 * WAL write failure.
@@ -716,6 +700,15 @@ txn_commit_async(struct txn *txn)
 		trigger_create(trig, txn_limbo_on_rollback,
 			       limbo_entry, NULL);
 		txn_on_rollback(txn, trig);
+	}
+
+	fiber_set_txn(fiber(), NULL);
+	if (journal_write_async(req) != 0) {
+		fiber_set_txn(fiber(), txn);
+		txn_rollback(txn);
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+		return -1;
 	}
 	return 0;
 }
