@@ -104,6 +104,8 @@ txn_limbo_assign_lsn(struct txn_limbo *limbo, struct txn_limbo_entry *entry,
 static bool
 txn_limbo_check_complete(struct txn_limbo *limbo, struct txn_limbo_entry *entry)
 {
+	if (txn_limbo_entry_is_complete(entry))
+		return true;
 	struct vclock_iterator iter;
 	vclock_iterator_init(&iter, &limbo->vclock);
 	int ack_count = 0;
