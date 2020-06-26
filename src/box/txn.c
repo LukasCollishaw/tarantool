@@ -554,8 +554,14 @@ txn_journal_entry_new(struct txn *txn)
 	 * space can't be synchronous. So if there is at least one
 	 * synchronous space, the transaction is not local.
 	 */
-	if (is_sync && !txn_has_flag(txn, TXN_FORCE_ASYNC))
-		txn_set_flag(txn, TXN_WAIT_ACK);
+	if (!txn_has_flag(txn, TXN_FORCE_ASYNC)) {
+		if (is_sync) {
+			txn_set_flag(txn, TXN_IS_SYNC);
+			txn_set_flag(txn, TXN_WAIT_ACK);
+		} else if (!txn_limbo_is_empty(&txn_limbo)) {
+			txn_set_flag(txn, TXN_WAIT_ACK);
+		}
+	}
 
 	assert(remote_row == req->rows + txn->n_applier_rows);
 	assert(local_row == remote_row + txn->n_new_rows);

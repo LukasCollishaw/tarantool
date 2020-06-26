@@ -67,10 +67,20 @@ enum txn_flag {
 	/** on_commit and/or on_rollback list is not empty. */
 	TXN_HAS_TRIGGERS,
 	/**
-	 * Transaction, touched sync spaces, enters 'waiting for
-	 * acks' state before commit. In this state it waits until
-	 * it is replicated onto a quorum of replicas, and only
-	 * then finishes commit and returns success to a user.
+	 * The transaction is synchronous. It touched sync spaces
+	 * and will block all newer async transactions in case
+	 * they appear before this one is finished.
+	 */
+	TXN_IS_SYNC,
+	/**
+	 * A sync transaction, or an async transaction committed
+	 * while there was a not finished sync transaction. It
+	 * enters 'waiting for acks' state before commit. In this
+	 * state a sync transaction waits until it is replicated
+	 * onto a quorum of replicas, and only then finishes
+	 * commit and returns success to a user. Async transaction
+	 * in this state waits until all previous sync
+	 * transactions gain needed number of acks.
 	 */
 	TXN_WAIT_ACK,
 	/**

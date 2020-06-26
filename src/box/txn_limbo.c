@@ -135,20 +135,17 @@ txn_limbo_write_rollback(struct txn_limbo *limbo,
 int
 txn_limbo_wait_complete(struct txn_limbo *limbo, struct txn_limbo_entry *entry)
 {
+	struct txn_limbo_entry *e, *tmp;
 	struct txn *txn = entry->txn;
 	assert(entry->lsn > 0);
 	assert(!txn_has_flag(txn, TXN_IS_DONE));
-	assert(txn_has_flag(txn, TXN_WAIT_ACK));
-	if (txn_limbo_check_complete(limbo, entry)) {
-		txn_limbo_remove(limbo, entry);
-		return 0;
-	}
+	if (txn_limbo_check_complete(limbo, entry))
+		goto complete;
 	bool cancellable = fiber_set_cancellable(false);
 	bool timed_out = fiber_yield_timeout(txn_limbo_confirm_timeout(limbo));
 	fiber_set_cancellable(cancellable);
 	if (timed_out) {
 		txn_limbo_write_rollback(limbo, entry);
-		struct txn_limbo_entry *e, *tmp;
 		rlist_foreach_entry_safe_reverse(e, &limbo->queue,
 						 in_queue, tmp) {
 			e->is_rollback = true;
@@ -163,6 +160,7 @@ txn_limbo_wait_complete(struct txn_limbo *limbo, struct txn_limbo_entry *entry)
 		diag_set(ClientError, ER_SYNC_QUORUM_TIMEOUT);
 		return -1;
 	}
+complete:
 	assert(txn_limbo_entry_is_complete(entry));
 	/*
 	 * The first tx to be rolled back already performed all
@@ -204,6 +202,13 @@ txn_limbo_write_confirm_rollback(struct txn_limbo *limbo,
 	struct txn *txn = txn_begin();
 	if (txn == NULL)
 		return -1;
+	/*
+	 * This is not really a transaction. It just uses txn API
+	 * to put the data into WAL. And obviously it should not
+	 * go to the limbo and block on the very same sync
+	 * transaction which it tries to confirm now.
+	 */
+	txn_set_flag(txn, TXN_FORCE_ASYNC);
 
 	if (txn_begin_stmt(txn, NULL) != 0)
 		goto rollback;
@@ -233,7 +238,16 @@ txn_limbo_read_confirm(struct txn_limbo *limbo, int64_t lsn)
 	assert(limbo->instance_id != REPLICA_ID_NIL);
 	struct txn_limbo_entry *e, *tmp;
 	rlist_foreach_entry_safe(e, &limbo->queue, in_queue, tmp) {
-		if (e->lsn > lsn)
+		/*
+		 * Confirm a transaction if
+		 * - it is a sync transaction covered by the
+		 *   confirmation LSN;
+		 * - it is an async transaction, and it is the
+		 *   last in the queue. So it does not depend on
+		 *   a not finished sync transaction anymore and
+		 *   can be confirmed too.
+		 */
+		if (e->lsn > lsn && txn_has_flag(e->txn, TXN_IS_SYNC))
 			break;
 		e->is_commit = true;
 		txn_limbo_remove(limbo, e);
@@ -302,15 +316,25 @@ txn_limbo_ack(struct txn_limbo *limbo, uint32_t replica_id, int64_t lsn)
 	struct txn_limbo_entry *e;
 	struct txn_limbo_entry *last_quorum = NULL;
 	rlist_foreach_entry(e, &limbo->queue, in_queue) {
-		if (e->lsn <= prev_lsn)
-			continue;
 		if (e->lsn > lsn)
 			break;
-		if (++e->ack_count >= replication_synchro_quorum) {
-			e->is_commit = true;
-			last_quorum = e;
+		if (e->lsn <= prev_lsn)
+			continue;
+		assert(e->ack_count < VCLOCK_MAX);
+		/*
+		 * Sync transactions need to collect acks. Async
+		 * transactions are automatically committed right
+		 * after all the previous sync transactions are.
+		 */
+		if (txn_has_flag(e->txn, TXN_IS_SYNC)) {
+			if (++e->ack_count < replication_synchro_quorum)
+				continue;
+		} else if (last_quorum == NULL) {
+			continue;
 		}
-		assert(e->ack_count <= VCLOCK_MAX);
+
+		e->is_commit = true;
+		last_quorum = e;
 	}
 	if (last_quorum != NULL) {
 		if (txn_limbo_write_confirm(limbo, last_quorum) != 0) {
