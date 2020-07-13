@@ -184,6 +184,22 @@ field_mp_type_is_compatible(enum field_type type, const char *data,
 }
 
 static inline bool
+field_mp_type_validate(enum field_type type, const char *data, bool is_nullable)
+{
+	if (field_mp_type_is_compatible(type, data, is_nullable))
+		return true;
+	enum mp_type mp_type = mp_typeof(*data);
+	if (type == FIELD_TYPE_UNSIGNED && mp_type == MP_DOUBLE)
+		return true;
+	if (type == FIELD_TYPE_INTEGER && mp_type == MP_DOUBLE)
+		return true;
+	if (type == FIELD_TYPE_DOUBLE && (mp_type == MP_UINT ||
+					  mp_type == MP_INT))
+		return true;
+	return false;
+}
+
+static inline bool
 action_is_nullable(enum on_conflict_action nullable_action)
 {
 	return nullable_action == ON_CONFLICT_ACTION_NONE;

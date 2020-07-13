@@ -450,6 +450,8 @@ static int
 tuple_compare_field(const char *field_a, const char *field_b,
 		    int8_t type, struct coll *coll)
 {
+	enum mp_type a_type;
+	enum mp_type b_type;
 	switch (type) {
 	case FIELD_TYPE_UNSIGNED:
 		return mp_compare_uint(field_a, field_b);
@@ -458,14 +460,21 @@ tuple_compare_field(const char *field_a, const char *field_b,
 		       mp_compare_str_coll(field_a, field_b, coll) :
 		       mp_compare_str(field_a, field_b);
 	case FIELD_TYPE_INTEGER:
-		return mp_compare_integer_with_type(field_a,
-						    mp_typeof(*field_a),
-						    field_b,
-						    mp_typeof(*field_b));
+		a_type = mp_typeof(*field_a);
+		b_type = mp_typeof(*field_b);
+		if (b_type == MP_INT || b_type == MP_UINT)
+			return mp_compare_integer_with_type(field_a,
+							    a_type,
+							    field_b,
+							    b_type);
+		return mp_compare_number_with_type(field_a, a_type,
+						   field_b, b_type);
 	case FIELD_TYPE_NUMBER:
 		return mp_compare_number(field_a, field_b);
 	case FIELD_TYPE_DOUBLE:
-		return mp_compare_double(field_a, field_b);
+		if (mp_typeof(*field_b) == MP_DOUBLE)
+			return mp_compare_double(field_a, field_b);
+		return mp_compare_number(field_a, field_b);
 	case FIELD_TYPE_BOOLEAN:
 		return mp_compare_bool(field_a, field_b);
 	case FIELD_TYPE_VARBINARY:
@@ -1806,17 +1815,27 @@ field_hint(const char *field, struct coll *coll)
 {
 	if (is_nullable && mp_typeof(*field) == MP_NIL)
 		return hint_nil();
+	enum mp_type mp_type;
 	switch (type) {
 	case FIELD_TYPE_BOOLEAN:
 		return field_hint_boolean(field);
 	case FIELD_TYPE_UNSIGNED:
-		return field_hint_unsigned(field);
+		mp_type = mp_typeof(*field);
+		if (likely(mp_type == MP_UINT))
+			return field_hint_unsigned(field);
+		return field_hint_number(field);
 	case FIELD_TYPE_INTEGER:
-		return field_hint_integer(field);
+		mp_type = mp_typeof(*field);
+		if (likely(mp_type == MP_UINT || mp_type == MP_INT))
+			return field_hint_integer(field);
+		return field_hint_number(field);
 	case FIELD_TYPE_NUMBER:
 		return field_hint_number(field);
 	case FIELD_TYPE_DOUBLE:
-		return field_hint_double(field);
+		mp_type = mp_typeof(*field);
+		if (likely(mp_type == MP_DOUBLE))
+			return field_hint_double(field);
+		return field_hint_number(field);
 	case FIELD_TYPE_STRING:
 		return field_hint_string(field, coll);
 	case FIELD_TYPE_VARBINARY:
