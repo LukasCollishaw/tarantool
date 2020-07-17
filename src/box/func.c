@@ -510,6 +510,7 @@ func_c_destroy(struct func *base)
 {
 	assert(base->vtab == &func_c_vtab);
 	assert(base != NULL && base->def->language == FUNC_LANGUAGE_C);
+	free(base->def->args);
 	struct func_c *func = (struct func_c *) base;
 	func_c_unload(func);
 	TRASH(base);

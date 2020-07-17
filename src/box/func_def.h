@@ -80,6 +80,12 @@ func_opts_create(struct func_opts *opts)
 	*opts = func_opts_default;
 }
 
+/** Definition of a function argument. */
+struct arg_def {
+	/** Field type of an argument. */
+	enum field_type type;
+};
+
 /**
  * Definition of a function. Function body is not stored
  * or replicated (yet).
@@ -109,6 +115,8 @@ struct func_def {
 	 * available.
 	 */
 	bool is_sandboxed;
+	/** A list of function argument definitions. */
+	struct arg_def *args;
 	/** The count of function's input arguments. */
 	int param_count;
 	/** The type of the value returned by function. */

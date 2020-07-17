@@ -3418,6 +3418,12 @@ func_def_new_from_tuple(struct tuple *tuple)
 				return NULL;
 			}
 		}
+		/*
+		 * TODO: parse arguments def from _func. Now they
+		 * are used solely in SQL builts.
+		 * See box/sql/func.c for details.
+		 */
+		def->args = NULL;
 		def->param_count = argc;
 		const char *opts = tuple_field(tuple, BOX_FUNC_FIELD_OPTS);
 		if (opts_decode(&def->opts, func_opts_reg, &opts,
@@ -3433,6 +3439,12 @@ func_def_new_from_tuple(struct tuple *tuple)
 		/* By default export to Lua, but not other frontends. */
 		def->exports.lua = true;
 		def->param_count = 0;
+		/*
+		 * TODO: parse arguments def from _func. Now they
+		 * are used solely in SQL builts.
+		 * See box/sql/func.c for details.
+		 */
+		def->args = NULL;
 	}
 	if (func_def_check(def) != 0)
 		return NULL;

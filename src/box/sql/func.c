@@ -2942,6 +2942,7 @@ func_sql_builtin_destroy(struct func *func)
 {
 	assert(func->vtab == &func_sql_builtin_vtab);
 	assert(func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
+	free(func->def->args);
 	free(func);
 }
 
