@@ -106,7 +106,7 @@ struct port_vtab {
 	 * @get_msgpack method, i.e. it depends on particular
 	 * implementation
 	 */
-	struct sql_value *(*get_vdbemem)(struct port *port, uint32_t *size);
+	struct Mem *(*get_vdbemem)(struct port *port, uint32_t *size);
 	/** Destroy a port and release associated resources. */
 	void (*destroy)(struct port *port);
 };
@@ -159,7 +159,7 @@ port_get_msgpack(struct port *port, uint32_t *size)
 	return port->vtab->get_msgpack(port, size);
 }
 
-static inline struct sql_value *
+static inline struct Mem *
 port_get_vdbemem(struct port *port, uint32_t *size)
 {
 	return port->vtab->get_vdbemem(port, size);

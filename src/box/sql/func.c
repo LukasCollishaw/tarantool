@@ -107,8 +107,7 @@ port_vdbemem_dump_lua(struct port *base, struct lua_State *L, bool is_flat)
 	struct port_vdbemem *port = (struct port_vdbemem *) base;
 	assert(is_flat == true);
 	for (uint32_t i = 0; i < port->mem_count; i++) {
-		sql_value *param =
-			(sql_value *)((struct Mem *)port->mem + i);
+		sql_value *param = port->mem + i;
 		switch (sql_value_type(param)) {
 		case MP_INT:
 			luaL_pushint64(L, sql_value_int64(param));
@@ -152,8 +151,7 @@ port_vdbemem_get_msgpack(struct port *base, uint32_t *size)
 		      set_encode_error, &is_error);
 	mpstream_encode_array(&stream, port->mem_count);
 	for (uint32_t i = 0; i < port->mem_count && !is_error; i++) {
-		sql_value *param =
-			(sql_value *)((struct Mem *)port->mem + i);
+		sql_value *param = port->mem + i;
 		switch (sql_value_type(param)) {
 		case MP_INT: {
 			sql_int64 val = sql_value_int64(param);
@@ -214,8 +212,7 @@ error:
 static const struct port_vtab port_vdbemem_vtab;
 
 void
-port_vdbemem_create(struct port *base, struct sql_value *mem,
-		    uint32_t mem_count)
+port_vdbemem_create(struct port *base, struct Mem *mem, uint32_t mem_count)
 {
 	struct port_vdbemem *port = (struct port_vdbemem *) base;
 	port->vtab = &port_vdbemem_vtab;
@@ -223,7 +220,7 @@ port_vdbemem_create(struct port *base, struct sql_value *mem,
 	port->mem_count = mem_count;
 }
 
-static struct sql_value *
+static struct Mem *
 port_vdbemem_get_vdbemem(struct port *base, uint32_t *mem_count)
 {
 	struct port_vdbemem *port = (struct port_vdbemem *) base;
@@ -242,7 +239,7 @@ static const struct port_vtab port_vdbemem_vtab = {
 	.destroy = NULL,
 };
 
-struct sql_value *
+struct Mem *
 port_lua_get_vdbemem(struct port *base, uint32_t *size)
 {
 	struct port_lua *port = (struct port_lua *) base;
@@ -297,7 +294,7 @@ port_lua_get_vdbemem(struct port *base, uint32_t *size)
 			goto error;
 		}
 	}
-	return (struct sql_value *)val;
+	return val;
 error:
 	for (int i = 0; i < argc; i++)
 		sqlVdbeMemRelease(&val[i]);
@@ -305,7 +302,7 @@ error:
 	return NULL;
 }
 
-struct sql_value *
+struct Mem *
 port_c_get_vdbemem(struct port *base, uint32_t *size)
 {
 	struct port_c *port = (struct port_c *)base;
@@ -369,7 +366,7 @@ port_c_get_vdbemem(struct port *base, uint32_t *size)
 		}
 		i++;
 	}
-	return (struct sql_value *) val;
+	return val;
 error:
 	for (int i = 0; i < port->size; i++)
 		sqlVdbeMemRelease(&val[i]);

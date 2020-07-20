@@ -1901,6 +1901,7 @@ case OP_BuiltinFunction: {
 	pCtx->is_aborted = false;
 	assert(pCtx->func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
 	struct func_sql_builtin *func = (struct func_sql_builtin *)pCtx->func;
+	func->context = pCtx;
 	func->call(pCtx, pCtx->argc, pCtx->argv);
 
 	/* If the function returned an error, throw an exception */
@@ -1943,7 +1944,7 @@ case OP_FunctionByName: {
 
 	struct region *region = &fiber()->gc;
 	size_t region_svp = region_used(region);
-	port_vdbemem_create(&args, (struct sql_value *)argv, argc);
+	port_vdbemem_create(&args, argv, argc);
 	if (func_call(func, &args, &ret) != 0)
 		goto abort_due_to_error;
 
@@ -5222,6 +5223,7 @@ case OP_AggStep: {
 	pCtx->skipFlag = 0;
 	assert(pCtx->func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
 	struct func_sql_builtin *func = (struct func_sql_builtin *)pCtx->func;
+	func->context = pCtx;
 	func->call(pCtx, pCtx->argc, pCtx->argv);
 	if (pCtx->is_aborted) {
 		sqlVdbeMemRelease(&t);

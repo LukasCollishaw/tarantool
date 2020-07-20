@@ -4404,6 +4404,8 @@ struct func_sql_builtin {
 	struct func base;
 	/** A bitmask of SQL flags. */
 	uint16_t flags;
+	/** SQL context. */
+	struct sql_context *context;
 	/**
 	 * A VDBE-memory-compatible call method.
 	 * SQL built-ins don't use func base class "call"
