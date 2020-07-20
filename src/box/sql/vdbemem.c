@@ -1360,8 +1360,9 @@ valueFromFunction(sql * db,	/* The database connection */
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.pOut = pVal;
 	ctx.func = func;
-	((struct func_sql_builtin *)func)->call(&ctx, nVal, apVal);
-	assert(!ctx.is_aborted);
+	/* TODO: uncomment when stat tables will be reenabled. */
+	/* ((struct func_sql_builtin *)func)->call(&ctx, nVal, apVal);
+	assert(!ctx.is_aborted); */
 	sql_value_apply_type(pVal, type);
 	assert(rc == 0);
 

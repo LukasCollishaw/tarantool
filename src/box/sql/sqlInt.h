@@ -553,13 +553,6 @@ enum sql_subtype {
 void
 sql_randomness(int N, void *P);
 
-/**
- * Return the number of affected rows in the last SQL statement.
- */
-void
-sql_row_count(struct sql_context *context, MAYBE_UNUSED int unused1,
-	      MAYBE_UNUSED sql_value **unused2);
-
 void *
 sql_aggregate_context(sql_context *,
 			  int nBytes);
@@ -4406,14 +4399,6 @@ struct func_sql_builtin {
 	uint16_t flags;
 	/** SQL context. */
 	struct sql_context *context;
-	/**
-	 * A VDBE-memory-compatible call method.
-	 * SQL built-ins don't use func base class "call"
-	 * method to provide a best performance for SQL requests.
-	 * Access checks are redundant, because all SQL built-ins
-	 * are predefined and are executed on SQL privilege level.
-	 */
-	void (*call)(sql_context *ctx, int argc, sql_value **argv);
 	/**
 	 * A VDBE-memory-compatible finalize method
 	 * (is valid only for aggregate function).

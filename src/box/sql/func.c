@@ -377,57 +377,84 @@ error:
 /*
  * Implementation of the non-aggregate min() and max() functions
  */
-static void
-minmaxFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_least_greatest(struct func *base, struct port *args, struct port *ret)
 {
-	int i;
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
+	uint32_t i;
 	int iBest;
 	struct coll *pColl;
-	struct func *func = context->func;
-	int mask = sql_func_flag_is_set(func, SQL_FUNC_MAX) ? -1 : 0;
+	int mask = sql_func_flag_is_set(base, SQL_FUNC_MAX) ? -1 : 0;
 	if (argc < 2) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT,
 		mask ? "GREATEST" : "LEAST", "at least two", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	pColl = sqlGetFuncCollSeq(context);
+	pColl = sqlGetFuncCollSeq(func->context);
 	assert(mask == -1 || mask == 0);
 	iBest = 0;
-	if (sql_value_is_null(argv[0]))
-		return;
+	if (sql_value_is_null(&argv[0])) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 	for (i = 1; i < argc; i++) {
-		if (sql_value_is_null(argv[i]))
-			return;
-		if ((sqlMemCompare(argv[iBest], argv[i], pColl) ^ mask) >=
+		if (sql_value_is_null(&argv[i])) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
+		if ((sqlMemCompare(&argv[iBest], &argv[i], pColl) ^ mask) >=
 		    0) {
 			testcase(mask == 0);
 			iBest = i;
 		}
 	}
-	sql_result_value(context, argv[iBest]);
+	struct Mem *result = sqlValueNew(sql_get());
+	sqlVdbeMemCopy(result, &argv[iBest]);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * Return the type of the argument.
  */
-static void
-typeofFunc(sql_context * context, int NotUsed, sql_value ** argv)
+static int
+sql_func_typeof(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
 	const char *z = 0;
-	UNUSED_PARAMETER(NotUsed);
-	enum field_type f_t = argv[0]->field_type;
+	struct Mem *result = sqlValueNew(sql_get());
+	enum field_type f_t = argv[0].field_type;
 	/*
 	 * SCALAR is not a basic type, but rather an aggregation of
 	 * types. Thus, ignore SCALAR field type and return msgpack
 	 * format type.
 	 */
-	if (f_t != field_type_MAX && f_t != FIELD_TYPE_SCALAR) {
-		sql_result_text(context, field_type_strs[argv[0]->field_type],
-				-1, SQL_STATIC);
-		return;
+	if (f_t != field_type_MAX && f_t != FIELD_TYPE_SCALAR &&
+	    f_t != FIELD_TYPE_ANY) {
+		z = field_type_strs[argv[0].field_type];
+		if (sqlVdbeMemSetStr(result, z, -1, 1, SQL_STATIC) != 0)
+			return -1;
+		port_vdbemem_create(ret, result, 1);
+		return 0;
 	}
-	switch (sql_value_type(argv[0])) {
+	switch (sql_value_type(&argv[0])) {
 	case MP_INT:
 	case MP_UINT:
 		z = "integer";
@@ -451,43 +478,61 @@ typeofFunc(sql_context * context, int NotUsed, sql_value ** argv)
 		unreachable();
 		break;
 	}
-	sql_result_text(context, z, -1, SQL_STATIC);
+	if (sqlVdbeMemSetStr(result, z, -1, 1, SQL_STATIC) != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * Implementation of the length() function
  */
-static void
-lengthFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_length(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
 	int len;
 
 	assert(argc == 1);
 	UNUSED_PARAMETER(argc);
-	switch (sql_value_type(argv[0])) {
+	switch (sql_value_type(&argv[0])) {
 	case MP_BIN:
 	case MP_ARRAY:
 	case MP_MAP:
 	case MP_INT:
 	case MP_UINT:
 	case MP_BOOL:
-	case MP_DOUBLE:{
-			sql_result_uint(context, sql_value_bytes(argv[0]));
+	case MP_DOUBLE: {
+			len = sql_value_bytes(&argv[0]);
 			break;
 		}
 	case MP_STR:{
-			const unsigned char *z = sql_value_text(argv[0]);
-			if (z == 0)
-				return;
-			len = sql_utf8_char_count(z, sql_value_bytes(argv[0]));
-			sql_result_uint(context, len);
+			const unsigned char *z = sql_value_text(&argv[0]);
+			if (z == NULL) {
+				port_vdbemem_create(ret, NULL, 0);
+				return 0;
+			}
+			len = sql_utf8_char_count(z, sql_value_bytes(&argv[0]));
 			break;
 		}
 	default:{
-			sql_result_null(context);
-			break;
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
 		}
 	}
+	struct Mem *result = sqlValueNew(sql_get());
+	mem_set_int(result, len, false);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -496,35 +541,44 @@ lengthFunc(sql_context * context, int argc, sql_value ** argv)
  * IMP: R-23979-26855 The abs(X) function returns the absolute value of
  * the numeric argument X.
  */
-static void
-absFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_abs(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
 	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	switch (sql_value_type(argv[0])) {
+
+	struct Mem *result = sqlValueNew(sql_get());
+
+	switch (sql_value_type(&argv[0])) {
 	case MP_UINT: {
-		sql_result_uint(context, sql_value_uint64(argv[0]));
+		mem_set_u64(result, sql_value_uint64(&argv[0]));
 		break;
 	}
 	case MP_INT: {
-		int64_t value = sql_value_int64(argv[0]);
+		int64_t value = sql_value_int64(&argv[0]);
 		assert(value < 0);
-		sql_result_uint(context, -value);
+		mem_set_u64(result, (uint64_t)(-value));
 		break;
 	}
 	case MP_NIL:{
 			/* IMP: R-37434-19929 Abs(X) returns NULL if X is NULL. */
-			sql_result_null(context);
-			break;
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
 		}
 	case MP_BOOL:
 	case MP_BIN:
 	case MP_ARRAY:
 	case MP_MAP: {
 		diag_set(ClientError, ER_INCONSISTENT_TYPES, "number",
-			 mem_type_to_str(argv[0]));
-		context->is_aborted = true;
-		return;
+			 mem_type_to_str(&argv[0]));
+		return -1;
 	}
 	default:{
 			/* Because sql_value_double() returns 0.0 if the argument is not
@@ -532,13 +586,16 @@ absFunc(sql_context * context, int argc, sql_value ** argv)
 			 * IMP: R-01992-00519 Abs(X) returns 0.0 if X is a string or blob
 			 * that cannot be converted to a numeric value.
 			 */
-			double rVal = sql_value_double(argv[0]);
+			double rVal = sql_value_double(&argv[0]);
 			if (rVal < 0)
 				rVal = -rVal;
-			sql_result_double(context, rVal);
+			mem_set_double(result, rVal);
 			break;
 		}
 	}
+
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /**
@@ -552,17 +609,29 @@ absFunc(sql_context * context, int argc, sql_value ** argv)
  * more than the number of bytes in haystack prior to the first
  * occurrence of needle, or 0 if needle never occurs in haystack.
  */
-static void
-position_func(struct sql_context *context, int argc, struct Mem **argv)
+static int
+sql_func_position(struct func *base, struct port *args, struct port *ret)
 {
-	UNUSED_PARAMETER(argc);
-	struct Mem *needle = argv[0];
-	struct Mem *haystack = argv[1];
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 2);
+
+	struct Mem *result;
+	struct Mem *needle = &argv[0];
+	struct Mem *haystack = &argv[1];
 	enum mp_type needle_type = sql_value_type(needle);
 	enum mp_type haystack_type = sql_value_type(haystack);
 
-	if (haystack_type == MP_NIL || needle_type == MP_NIL)
-		return;
+	if (haystack_type == MP_NIL || needle_type == MP_NIL) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 	/*
 	 * Position function can be called only with string
 	 * or blob params.
@@ -576,8 +645,7 @@ position_func(struct sql_context *context, int argc, struct Mem **argv)
 		diag_set(ClientError, ER_INCONSISTENT_TYPES,
 			 "text or varbinary",
 			 mem_type_to_str(inconsistent_type_arg));
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
 	/*
 	 * Both params of Position function must be of the same
@@ -586,13 +654,12 @@ position_func(struct sql_context *context, int argc, struct Mem **argv)
 	if (haystack_type != needle_type) {
 		diag_set(ClientError, ER_INCONSISTENT_TYPES,
 			 mem_type_to_str(needle), mem_type_to_str(haystack));
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
 
 	int n_needle_bytes = sql_value_bytes(needle);
 	int n_haystack_bytes = sql_value_bytes(haystack);
-	int position = 1;
+	uint64_t position = 1;
 	if (n_needle_bytes > 0) {
 		const unsigned char *haystack_str;
 		const unsigned char *needle_str;
@@ -653,7 +720,7 @@ position_func(struct sql_context *context, int argc, struct Mem **argv)
 					       n_haystack_bytes);
 			}
 			int beg_offset = 0;
-			struct coll *coll = sqlGetFuncCollSeq(context);
+			struct coll *coll = sqlGetFuncCollSeq(func->context);
 			int c;
 			for (c = 0; c + n_needle_chars <= n_haystack_chars; c++) {
 				if (coll->cmp((const char *) haystack_str + beg_offset,
@@ -673,35 +740,60 @@ position_func(struct sql_context *context, int argc, struct Mem **argv)
 		}
 	}
 finish:
-	assert(position >= 0);
-	sql_result_uint(context, position);
+	result = sqlValueNew(sql_get());
+	mem_set_u64(result, position);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * Implementation of the printf() function.
  */
-static void
-printfFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_printf(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	PrintfArguments x;
 	StrAccum str;
 	const char *zFormat;
 	int n;
-	sql *db = sql_context_db_handle(context);
+	sql *db = sql_get();
 
 	if (argc >= 1
-	    && (zFormat = (const char *)sql_value_text(argv[0])) != 0) {
+	    && (zFormat = (const char *)sql_value_text(&argv[0])) != 0) {
+		struct region *region = &fiber()->gc;
+		size_t region_svp = region_used(region);
+		uint32_t size = (argc - 1) * sizeof(struct Mem *);
+		struct Mem **array =
+			region_aligned_alloc(region, size, alignof(struct Mem));
+		for (uint32_t i = 0; i < argc - 1; ++i)
+			array[i] = &argv[i + 1];
 		x.nArg = argc - 1;
 		x.nUsed = 0;
-		x.apArg = argv + 1;
+		x.apArg = array;
 		sqlStrAccumInit(&str, db, 0, 0,
 				    db->aLimit[SQL_LIMIT_LENGTH]);
 		str.printfFlags = SQL_PRINTF_SQLFUNC;
 		sqlXPrintf(&str, zFormat, &x);
+		region_truncate(region, region_svp);
 		n = str.nChar;
-		sql_result_text(context, sqlStrAccumFinish(&str), n,
-				    SQL_DYNAMIC);
+		struct Mem *result = sqlValueNew(db);
+		const char *z = sqlStrAccumFinish(&str);
+		if (sqlVdbeMemSetStr(result, z, n, 1, SQL_DYNAMIC) != 0)
+			return -1;
+		port_vdbemem_create(ret, result, 1);
+		return 0;
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 /*
@@ -716,9 +808,18 @@ printfFunc(sql_context * context, int argc, sql_value ** argv)
  *
  * If p2 is negative, return the p2 characters preceding p1.
  */
-static void
-substrFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_substr(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	const unsigned char *z;
 	const unsigned char *z2;
 	int len;
@@ -729,39 +830,42 @@ substrFunc(sql_context * context, int argc, sql_value ** argv)
 	if (argc != 2 && argc != 3) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT, "SUBSTR",
 			 "1 or 2", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	if (sql_value_is_null(argv[1])
-	    || (argc == 3 && sql_value_is_null(argv[2]))
+	if (sql_value_is_null(&argv[1])
+	    || (argc == 3 && sql_value_is_null(&argv[2]))
 	    ) {
-		return;
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
 	}
-	p0type = sql_value_type(argv[0]);
-	p1 = sql_value_int(argv[1]);
+	p0type = sql_value_type(&argv[0]);
+	p1 = sql_value_int(&argv[1]);
 	if (p0type == MP_BIN) {
-		len = sql_value_bytes(argv[0]);
-		z = sql_value_blob(argv[0]);
-		if (z == 0)
-			return;
-		assert(len == sql_value_bytes(argv[0]));
+		len = sql_value_bytes(&argv[0]);
+		z = sql_value_blob(&argv[0]);
+		if (z == NULL) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
+		assert(len == sql_value_bytes(&argv[0]));
 	} else {
-		z = sql_value_text(argv[0]);
-		if (z == 0)
-			return;
+		z = sql_value_text(&argv[0]);
+		if (z == NULL) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
 		len = 0;
 		if (p1 < 0)
-			len = sql_utf8_char_count(z, sql_value_bytes(argv[0]));
+			len = sql_utf8_char_count(z, sql_value_bytes(&argv[0]));
 	}
 	if (argc == 3) {
-		p2 = sql_value_int(argv[2]);
+		p2 = sql_value_int(&argv[2]);
 		if (p2 < 0) {
 			p2 = -p2;
 			negP2 = 1;
 		}
 	} else {
-		p2 = sql_context_db_handle(context)->
-		    aLimit[SQL_LIMIT_LENGTH];
+		p2 = sql_get()->aLimit[SQL_LIMIT_LENGTH];
 	}
 	if (p1 < 0) {
 		p1 += len;
@@ -784,13 +888,14 @@ substrFunc(sql_context * context, int argc, sql_value ** argv)
 		}
 	}
 	assert(p1 >= 0 && p2 >= 0);
+	struct Mem *result = sqlValueNew(sql_get());
 	if (p0type != MP_BIN) {
 		/*
 		 * In the code below 'cnt' and 'n_chars' is
 		 * used because '\0' is not supposed to be
 		 * end-of-string symbol.
 		 */
-		int byte_size = sql_value_bytes(argv[0]);
+		int byte_size = sql_value_bytes(&argv[0]);
 		int n_chars = sql_utf8_char_count(z, byte_size);
 		int cnt = 0;
 		int i = 0;
@@ -806,50 +911,65 @@ substrFunc(sql_context * context, int argc, sql_value ** argv)
 			cnt++;
 		}
 		z2 += i;
-		sql_result_text64(context, (char *)z, z2 - z,
-				      SQL_TRANSIENT);
+		if (sqlVdbeMemSetStr(result, (char *)z, z2 - z, 1,
+				     SQL_TRANSIENT) != 0)
+			return -1;
 	} else {
 		if (p1 + p2 > len) {
 			p2 = len - p1;
 			if (p2 < 0)
 				p2 = 0;
 		}
-		sql_result_blob64(context, (char *)&z[p1], (u64) p2,
-				      SQL_TRANSIENT);
+		if (sqlVdbeMemSetStr(result, (char *)&z[p1], (uint64_t)p2, 1,
+				     SQL_TRANSIENT) != 0)
+			return -1;
 	}
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * Implementation of the round() function
  */
-static void
-roundFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_round(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	int n = 0;
 	double r;
 	if (argc != 1 && argc != 2) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT, "ROUND",
 			 "1 or 2", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
 	if (argc == 2) {
-		if (sql_value_is_null(argv[1]))
-			return;
-		n = sql_value_int(argv[1]);
+		if (sql_value_is_null(&argv[1])) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
+		n = sql_value_int(&argv[1]);
 		if (n < 0)
 			n = 0;
 	}
-	if (sql_value_is_null(argv[0]))
-		return;
-	enum mp_type mp_type = sql_value_type(argv[0]);
+	if (sql_value_is_null(&argv[0])) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
+	enum mp_type mp_type = sql_value_type(&argv[0]);
 	if (mp_type_is_bloblike(mp_type)) {
 		diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
-			 sql_value_to_diag_str(argv[0]), "numeric");
-		context->is_aborted = true;
-		return;
+			 sql_value_to_diag_str(&argv[0]), "numeric");
+		return -1;
 	}
-	r = sql_value_double(argv[0]);
+	r = sql_value_double(&argv[0]);
 	/* If Y==0 and X will fit in a 64-bit int,
 	 * handle the rounding directly,
 	 * otherwise use printf.
@@ -862,7 +982,10 @@ roundFunc(sql_context * context, int argc, sql_value ** argv)
 		const char *rounded_value = tt_sprintf("%.*f", n, r);
 		sqlAtoF(rounded_value, &r, sqlStrlen30(rounded_value));
 	}
-	sql_result_double(context, r);
+	struct Mem *result = sqlValueNew(sql_get());
+	mem_set_double(result, r);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -894,63 +1017,79 @@ contextMalloc(sql_context * context, i64 nByte)
 /*
  * Implementation of the upper() and lower() SQL functions.
  */
+static int
+icu_lower_upper(struct func *base, struct port *args, struct port *ret,
+		bool is_lower)
+{
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
 
-#define ICU_CASE_CONVERT(case_type)                                            \
-static void                                                                    \
-case_type##ICUFunc(sql_context *context, int argc, sql_value **argv)   \
-{                                                                              \
-	char *z1;                                                              \
-	const char *z2;                                                        \
-	int n;                                                                 \
-	UNUSED_PARAMETER(argc);                                                \
-	int arg_type = sql_value_type(argv[0]);                                \
-	if (mp_type_is_bloblike(arg_type)) {                                   \
-		diag_set(ClientError, ER_INCONSISTENT_TYPES, "text",           \
-			 "varbinary");                                         \
-		context->is_aborted = true;                                    \
-		return;                                                        \
-	}                                                                      \
-	z2 = (char *)sql_value_text(argv[0]);                              \
-	n = sql_value_bytes(argv[0]);                                      \
-	/*                                                                     \
-	 * Verify that the call to _bytes()                                    \
-	 * does not invalidate the _text() pointer.                            \
-	 */                                                                    \
-	assert(z2 == (char *)sql_value_text(argv[0]));                     \
-	if (!z2)                                                               \
-		return;                                                        \
-	z1 = contextMalloc(context, ((i64) n) + 1);                            \
-	if (z1 == NULL) {                                                      \
-		context->is_aborted = true;                                    \
-		return;                                                        \
-	}                                                                      \
-	UErrorCode status = U_ZERO_ERROR;                                      \
-	struct coll *coll = sqlGetFuncCollSeq(context);                    \
-	const char *locale = NULL;                                             \
-	if (coll != NULL && coll->type == COLL_TYPE_ICU) {                     \
-		locale = ucol_getLocaleByType(coll->collator,                  \
-					      ULOC_VALID_LOCALE, &status);     \
-	}                                                                      \
-	UCaseMap *case_map = ucasemap_open(locale, 0, &status);                \
-	assert(case_map != NULL);                                              \
-	int len = ucasemap_utf8To##case_type(case_map, z1, n, z2, n, &status); \
-	if (len > n) {                                                         \
-		status = U_ZERO_ERROR;                                         \
-		sql_free(z1);                                              \
-		z1 = contextMalloc(context, ((i64) len) + 1);                  \
-		if (z1 == NULL) {                                              \
-			context->is_aborted = true;                            \
-			return;                                                \
-		}                                                              \
-		ucasemap_utf8To##case_type(case_map, z1, len, z2, n, &status); \
-	}                                                                      \
-	ucasemap_close(case_map);                                              \
-	sql_result_text(context, z1, len, sql_free);                   \
-}                                                                              \
+	if (mp_type_is_bloblike(sql_value_type(&argv[0]))) {
+		diag_set(ClientError, ER_INCONSISTENT_TYPES, "text",
+			 "varbinary");
+		return -1;
+	}
+	const char *z2 = (const char *)sql_value_text(&argv[0]);
+	if (z2 == NULL) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
+	int n = sql_value_bytes(&argv[0]);
+	char *z1 = contextMalloc(func->context, n + 1);
+	if (z1 == NULL)
+		return -1;
+	UErrorCode status = U_ZERO_ERROR;
+	struct coll *coll = sqlGetFuncCollSeq(func->context);
+	const char *locale = NULL;
+	if (coll != NULL && coll->type == COLL_TYPE_ICU) {
+		locale = ucol_getLocaleByType(coll->collator,
+					      ULOC_VALID_LOCALE, &status);
+	}
+	UCaseMap *case_map = ucasemap_open(locale, 0, &status);
+	assert(case_map != NULL);
+	int len;
+	if (is_lower)
+		len = ucasemap_utf8ToLower(case_map, z1, n, z2, n, &status);
+	else
+		len = ucasemap_utf8ToUpper(case_map, z1, n, z2, n, &status);
+	if (len > n) {
+		status = U_ZERO_ERROR;
+		sql_free(z1);
+		z1 = contextMalloc(func->context, len + 1);
+		if (z1 == NULL)
+			return -1;
+		if (is_lower)
+			ucasemap_utf8ToLower(case_map, z1, len, z2, n, &status);
+		else
+			ucasemap_utf8ToUpper(case_map, z1, len, z2, n, &status);
+	}
+	ucasemap_close(case_map);
 
-ICU_CASE_CONVERT(Lower);
-ICU_CASE_CONVERT(Upper);
+	struct Mem *result = sqlValueNew(sql_get());
+	if (sqlVdbeMemSetStr(result, z1, len, 1, sql_free) != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
+}
 
+static int
+sql_func_lower(struct func *base, struct port *args, struct port *ret)
+{
+	return icu_lower_upper(base, args, ret, true);
+}
+
+static int
+sql_func_upper(struct func *base, struct port *args, struct port *ret)
+{
+	return icu_lower_upper(base, args, ret, false);
+}
 
 /*
  * Some functions like COALESCE() and IFNULL() and UNLIKELY() are implemented
@@ -965,40 +1104,63 @@ ICU_CASE_CONVERT(Upper);
 /*
  * Implementation of random().  Return a random integer.
  */
-static void
-randomFunc(sql_context * context, int NotUsed, sql_value ** NotUsed2)
+static int
+sql_func_random(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
 	int64_t r;
-	UNUSED_PARAMETER2(NotUsed, NotUsed2);
 	sql_randomness(sizeof(r), &r);
-	sql_result_int(context, r);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	mem_set_int(result, r, r < 0);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * Implementation of randomblob(N).  Return a random blob
  * that is N bytes long.
  */
-static void
-randomBlob(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_randomblob(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
 	int n;
 	unsigned char *p;
-	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	if (mp_type_is_bloblike(sql_value_type(argv[0]))) {
+	if (mp_type_is_bloblike(sql_value_type(&argv[0]))) {
 		diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
-			 sql_value_to_diag_str(argv[0]), "numeric");
-		context->is_aborted = true;
-		return;
+			 sql_value_to_diag_str(&argv[0]), "numeric");
+		return -1;
 	}
-	n = sql_value_int(argv[0]);
-	if (n < 1)
-		return;
-	p = contextMalloc(context, n);
+	n = sql_value_int(&argv[0]);
+	if (n < 1) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
+	p = contextMalloc(func->context, n);
 	if (p) {
 		sql_randomness(n, p);
-		sql_result_blob(context, (char *)p, n, sql_free);
+		struct Mem *result = sqlValueNew(sql_get());
+		if (sqlVdbeMemSetStr(result, (char *)p, n, 0, sql_free) != 0)
+			return -1;
+		port_vdbemem_create(ret, result, 1);
+		return 0;
 	}
+	return -1;
 }
 
 #define Utf8Read(s, e) \
@@ -1220,53 +1382,61 @@ sql_utf8_pattern_compare(const char *pattern,
  * Both arguments (A and B) must be of type TEXT. If one arguments
  * is NULL then result is NULL as well.
  */
-static void
-likeFunc(sql_context *context, int argc, sql_value **argv)
+static int
+sql_func_like(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	u32 escape = SQL_END_OF_STRING;
 	int nPat;
 	if (argc != 2 && argc != 3) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT,
 			 "LIKE", "2 or 3", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	sql *db = sql_context_db_handle(context);
-	int rhs_type = sql_value_type(argv[0]);
-	int lhs_type = sql_value_type(argv[1]);
+	sql *db = sql_get();
+	int rhs_type = sql_value_type(&argv[0]);
+	int lhs_type = sql_value_type(&argv[1]);
 
 	if (lhs_type != MP_STR || rhs_type != MP_STR) {
-		if (lhs_type == MP_NIL || rhs_type == MP_NIL)
-			return;
+		if (lhs_type == MP_NIL || rhs_type == MP_NIL) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
 		char *inconsistent_type = rhs_type != MP_STR ?
-					  mem_type_to_str(argv[0]) :
-					  mem_type_to_str(argv[1]);
+					  mem_type_to_str(&argv[0]) :
+					  mem_type_to_str(&argv[1]);
 		diag_set(ClientError, ER_INCONSISTENT_TYPES, "text",
 			 inconsistent_type);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	const char *zB = (const char *) sql_value_text(argv[0]);
-	const char *zA = (const char *) sql_value_text(argv[1]);
-	const char *zB_end = zB + sql_value_bytes(argv[0]);
-	const char *zA_end = zA + sql_value_bytes(argv[1]);
+	const char *zB = (const char *) sql_value_text(&argv[0]);
+	const char *zA = (const char *) sql_value_text(&argv[1]);
+	const char *zB_end = zB + sql_value_bytes(&argv[0]);
+	const char *zA_end = zA + sql_value_bytes(&argv[1]);
 
 	/*
 	 * Limit the length of the LIKE pattern to avoid problems
 	 * of deep recursion and N*N behavior in
 	 * sql_utf8_pattern_compare().
 	 */
-	nPat = sql_value_bytes(argv[0]);
+	nPat = sql_value_bytes(&argv[0]);
 	testcase(nPat == db->aLimit[SQL_LIMIT_LIKE_PATTERN_LENGTH]);
 	testcase(nPat == db->aLimit[SQL_LIMIT_LIKE_PATTERN_LENGTH] + 1);
 	if (nPat > db->aLimit[SQL_LIMIT_LIKE_PATTERN_LENGTH]) {
 		diag_set(ClientError, ER_SQL_EXECUTE, "LIKE pattern is too "\
 			 "complex");
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
 	/* Encoding did not change */
-	assert(zB == (const char *) sql_value_text(argv[0]));
+	assert(zB == (const char *) sql_value_text(&argv[0]));
 
 	if (argc == 3) {
 		/*
@@ -1274,31 +1444,37 @@ likeFunc(sql_context *context, int argc, sql_value **argv)
 		 * single UTF-8 character. Otherwise, return an
 		 * error.
 		 */
-		const unsigned char *zEsc = sql_value_text(argv[2]);
-		if (zEsc == 0)
-			return;
-		if (sql_utf8_char_count(zEsc, sql_value_bytes(argv[2])) != 1) {
+		const unsigned char *zEsc = sql_value_text(&argv[2]);
+		if (zEsc == 0) {
+			port_vdbemem_create(ret, NULL, 0);
+			return 0;
+		}
+		if (sql_utf8_char_count(zEsc, sql_value_bytes(&argv[2])) != 1) {
 			diag_set(ClientError, ER_SQL_EXECUTE, "ESCAPE "\
 				 "expression must be a single character");
-			context->is_aborted = true;
-			return;
+			return -1;
 		}
 		escape = sqlUtf8Read(&zEsc);
 	}
-	if (!zA || !zB)
-		return;
+	if (zA == NULL || zB == NULL) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 	int res;
-	struct coll *coll = sqlGetFuncCollSeq(context);
+	struct coll *coll = sqlGetFuncCollSeq(func->context);
 	assert(coll != NULL);
 	res = sql_utf8_pattern_compare(zB, zA, zB_end, zA_end, coll, escape);
 
 	if (res == INVALID_PATTERN) {
 		diag_set(ClientError, ER_SQL_EXECUTE, "LIKE pattern can only "\
 			 "contain UTF-8 characters");
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	sql_result_bool(context, res == MATCH);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	mem_set_bool(result, res == MATCH);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -1306,30 +1482,49 @@ likeFunc(sql_context *context, int argc, sql_value **argv)
  * argument if the arguments are different.  The result is NULL if the
  * arguments are equal to each other.
  */
-static void
-nullifFunc(sql_context * context, int NotUsed, sql_value ** argv)
+static int
+sql_func_nullif(struct func *base, struct port *args, struct port *ret)
 {
-	struct coll *pColl = sqlGetFuncCollSeq(context);
-	UNUSED_PARAMETER(NotUsed);
-	if (sqlMemCompare(argv[0], argv[1], pColl) != 0) {
-		sql_result_value(context, argv[0]);
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
 	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 2);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	struct coll *pColl = sqlGetFuncCollSeq(func->context);
+	if (sqlMemCompare(&argv[0], &argv[1], pColl) != 0) {
+		sqlVdbeMemCopy(result, &argv[0]);
+		port_vdbemem_create(ret, result, 1);
+		return 0;
+	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 /**
  * Implementation of the version() function.  The result is the
  * version of the Tarantool that is running.
- *
- * @param context Context being used.
- * @param unused1 Unused.
- * @param unused2 Unused.
  */
-static void
-sql_func_version(struct sql_context *context,
-		 MAYBE_UNUSED int unused1,
-		 MAYBE_UNUSED sql_value **unused2)
+static int
+sql_func_version(struct func *base, struct port *args, struct port *ret)
 {
-	sql_result_text(context, tarantool_version(), -1, SQL_STATIC);
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	const char *version = tarantool_version();
+	struct Mem *result = sqlValueNew(sql_get());
+	if (sqlVdbeMemSetStr(result, version, -1, 1, SQL_STATIC) != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /* Array for converting from half-bytes (nybbles) into ASCII hex
@@ -1347,41 +1542,51 @@ static const char hexdigits[] = {
  * "NULL".  Otherwise, the argument is enclosed in single quotes with
  * single-quote escapes.
  */
-static void
-quoteFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_quote(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
 	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	switch (sql_value_type(argv[0])) {
+
+	struct Mem *result = sqlValueNew(sql_get());
+
+	switch (sql_value_type(&argv[0])) {
 	case MP_DOUBLE:{
 			double r1, r2;
 			char zBuf[50];
-			r1 = sql_value_double(argv[0]);
+			r1 = sql_value_double(&argv[0]);
 			sql_snprintf(sizeof(zBuf), zBuf, "%!.15g", r1);
 			sqlAtoF(zBuf, &r2, 20);
 			if (r1 != r2) {
 				sql_snprintf(sizeof(zBuf), zBuf, "%!.20e",
 						 r1);
 			}
-			sql_result_text(context, zBuf, -1,
-					    SQL_TRANSIENT);
+			if (sqlVdbeMemSetStr(result, zBuf, -1, 1,
+					     SQL_TRANSIENT) != 0)
+				return -1;
 			break;
 		}
 	case MP_UINT:
 	case MP_INT:{
-			sql_result_value(context, argv[0]);
+			sqlVdbeMemCopy(result, &argv[0]);
 			break;
 		}
 	case MP_BIN:
 	case MP_ARRAY:
 	case MP_MAP: {
 			char *zText = 0;
-			char const *zBlob = sql_value_blob(argv[0]);
-			int nBlob = sql_value_bytes(argv[0]);
-			assert(zBlob == sql_value_blob(argv[0]));	/* No encoding change */
-			zText =
-			    (char *)contextMalloc(context,
-						  (2 * (i64) nBlob) + 4);
+			char const *zBlob = sql_value_blob(&argv[0]);
+			int nBlob = sql_value_bytes(&argv[0]);
+			assert(zBlob == sql_value_blob(&argv[0]));	/* No encoding change */
+			zText = (char *)contextMalloc(func->context,
+						      (2 * (i64) nBlob) + 4);
 			if (zText) {
 				int i;
 				for (i = 0; i < nBlob; i++) {
@@ -1394,8 +1599,9 @@ quoteFunc(sql_context * context, int argc, sql_value ** argv)
 				zText[(nBlob * 2) + 3] = '\0';
 				zText[0] = 'X';
 				zText[1] = '\'';
-				sql_result_text(context, zText, -1,
-						    SQL_TRANSIENT);
+				if (sqlVdbeMemSetStr(result, zText, -1, 1,
+						     SQL_TRANSIENT) != 0)
+					return -1;
 				sql_free(zText);
 			}
 			break;
@@ -1403,16 +1609,18 @@ quoteFunc(sql_context * context, int argc, sql_value ** argv)
 	case MP_STR:{
 			int i, j;
 			u64 n;
-			const unsigned char *zArg = sql_value_text(argv[0]);
+			const unsigned char *zArg = sql_value_text(&argv[0]);
 			char *z;
 
-			if (zArg == 0)
-				return;
+			if (zArg == 0) {
+				port_vdbemem_create(ret, NULL, 0);
+				return 0;
+			}
 			for (i = 0, n = 0; zArg[i]; i++) {
 				if (zArg[i] == '\'')
 					n++;
 			}
-			z = contextMalloc(context, ((i64) i) + ((i64) n) + 3);
+			z = contextMalloc(func->context, i + ((i64) n) + 3);
 			if (z) {
 				z[0] = '\'';
 				for (i = 0, j = 1; zArg[i]; i++) {
@@ -1423,36 +1631,56 @@ quoteFunc(sql_context * context, int argc, sql_value ** argv)
 				}
 				z[j++] = '\'';
 				z[j] = 0;
-				sql_result_text(context, z, j,
-						    sql_free);
+				if (sqlVdbeMemSetStr(result, z, j, 1,
+						     sql_free) != 0)
+					return -1;
 			}
 			break;
 		}
 	case MP_BOOL: {
-		sql_result_text(context,
-				SQL_TOKEN_BOOLEAN(sql_value_boolean(argv[0])),
-				-1, SQL_TRANSIENT);
+		const char *z = SQL_TOKEN_BOOLEAN(sql_value_boolean(&argv[0]));
+		if (sqlVdbeMemSetStr(result, z, -1, 1, SQL_STATIC) != 0)
+			return -1;
 		break;
 	}
 	default:{
-			assert(sql_value_is_null(argv[0]));
-			sql_result_text(context, "NULL", 4, SQL_STATIC);
+			assert(sql_value_is_null(&argv[0]));
+			if (sqlVdbeMemSetStr(result, "NULL", 4, 1,
+					     SQL_STATIC) != 0)
+				return -1;
 			break;
 		}
 	}
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * The unicode() function.  Return the integer unicode code-point value
  * for the first character of the input string.
  */
-static void
-unicodeFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_unicode(struct func *base, struct port *args, struct port *ret)
 {
-	const unsigned char *z = sql_value_text(argv[0]);
-	(void)argc;
-	if (z && z[0])
-		sql_result_uint(context, sqlUtf8Read(&z));
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	const unsigned char *z = sql_value_text(&argv[0]);
+	if (z != NULL && z[0] != '\0') {
+		mem_set_u64(result, sqlUtf8Read(&z));
+		port_vdbemem_create(ret, result, 1);
+		return 0;
+	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 /*
@@ -1460,23 +1688,29 @@ unicodeFunc(sql_context * context, int argc, sql_value ** argv)
  * an integer.  It constructs a string where each character of the string
  * is the unicode character for the corresponding integer argument.
  */
-static void
-charFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_char(struct func *base, struct port *args, struct port *ret)
 {
-	unsigned char *z, *zOut;
-	int i;
-	zOut = z = sql_malloc64(argc * 4 + 1);
-	if (z == NULL) {
-		context->is_aborted = true;
-		return;
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
 	}
-	for (i = 0; i < argc; i++) {
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
+	unsigned char *z, *zOut;
+	zOut = z = sql_malloc64(argc * 4 + 1);
+	if (z == NULL)
+		return -1;
+	for (uint32_t i = 0; i < argc; i++) {
 		uint64_t x;
 		unsigned c;
-		if (sql_value_type(argv[i]) == MP_INT)
+		if (sql_value_type(&argv[i]) == MP_INT)
 			x = 0xfffd;
 		else
-			x = sql_value_uint64(argv[i]);
+			x = sql_value_uint64(&argv[i]);
 		if (x > 0x10ffff)
 			x = 0xfffd;
 		c = (unsigned)(x & 0x1fffff);
@@ -1496,25 +1730,38 @@ charFunc(sql_context * context, int argc, sql_value ** argv)
 			*zOut++ = 0x80 + (u8) (c & 0x3F);
 		}
 	}
-	sql_result_text64(context, (char *)z, zOut - z, sql_free);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	if (sqlVdbeMemSetStr(result, (char *)z, zOut - z, 1, sql_free) != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
  * The hex() function.  Interpret the argument as a blob.  Return
  * a hexadecimal rendering as text.
  */
-static void
-hexFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_hex(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
 	int i, n;
 	const unsigned char *pBlob;
 	char *zHex, *z;
-	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	pBlob = sql_value_blob(argv[0]);
-	n = sql_value_bytes(argv[0]);
-	assert(pBlob == sql_value_blob(argv[0]));	/* No encoding change */
-	z = zHex = contextMalloc(context, ((i64) n) * 2 + 1);
+	pBlob = sql_value_blob(&argv[0]);
+	n = sql_value_bytes(&argv[0]);
+	assert(pBlob == sql_value_blob(&argv[0]));	/* No encoding change */
+	z = zHex = contextMalloc(func->context, ((i64) n) * 2 + 1);
 	if (zHex) {
 		for (i = 0; i < n; i++, pBlob++) {
 			unsigned char c = *pBlob;
@@ -1522,27 +1769,46 @@ hexFunc(sql_context * context, int argc, sql_value ** argv)
 			*(z++) = hexdigits[c & 0xf];
 		}
 		*z = 0;
-		sql_result_text(context, zHex, n * 2, sql_free);
+
+		struct Mem *result = sqlValueNew(sql_get());
+		if (sqlVdbeMemSetStr(result, zHex, n * 2, 1, sql_free) != 0)
+			return -1;
+		port_vdbemem_create(ret, result, 1);
+		return 0;
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 /*
  * The zeroblob(N) function returns a zero-filled blob of size N bytes.
  */
-static void
-zeroblobFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_zeroblob(struct func *base, struct port *args, struct port *ret)
 {
-	i64 n;
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
 	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	n = sql_value_int64(argv[0]);
+
+	i64 n;
+	n = sql_value_int64(&argv[0]);
 	if (n < 0)
 		n = 0;
-	if (sql_result_zeroblob64(context, n) != 0) {
+	if (n > sql_get()->aLimit[SQL_LIMIT_LENGTH]) {
 		diag_set(ClientError, ER_SQL_EXECUTE, "string or binary string"\
 			 "is too big");
-		context->is_aborted = true;
+		return -1;
 	}
+	struct Mem *result = sqlValueNew(sql_get());
+	sqlVdbeMemSetZeroBlob(result, n);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -1551,9 +1817,19 @@ zeroblobFunc(sql_context * context, int argc, sql_value ** argv)
  * from A by replacing every occurrence of B with C.  The match
  * must be exact.  Collating sequences are not used.
  */
-static void
-replaceFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_replace(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 3);
+
 	const unsigned char *zStr;	/* The input string A */
 	const unsigned char *zPattern;	/* The pattern string B */
 	const unsigned char *zRep;	/* The replacement string C */
@@ -1565,36 +1841,44 @@ replaceFunc(sql_context * context, int argc, sql_value ** argv)
 	int loopLimit;		/* Last zStr[] that might match zPattern[] */
 	int i, j;		/* Loop counters */
 
-	assert(argc == 3);
-	UNUSED_PARAMETER(argc);
-	zStr = sql_value_text(argv[0]);
-	if (zStr == 0)
-		return;
-	nStr = sql_value_bytes(argv[0]);
-	assert(zStr == sql_value_text(argv[0]));	/* No encoding change */
-	zPattern = sql_value_text(argv[1]);
+	zStr = sql_value_text(&argv[0]);
+	if (zStr == NULL) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
+	nStr = sql_value_bytes(&argv[0]);
+	assert(zStr == sql_value_text(&argv[0]));	/* No encoding change */
+	zPattern = sql_value_text(&argv[1]);
 	if (zPattern == 0) {
-		assert(sql_value_is_null(argv[1])
-		       || sql_context_db_handle(context)->mallocFailed);
-		return;
+		assert(sql_value_is_null(&argv[1]) || sql_get()->mallocFailed);
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
 	}
-	nPattern = sql_value_bytes(argv[1]);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	nPattern = sql_value_bytes(&argv[1]);
 	if (nPattern == 0) {
-		assert(! sql_value_is_null(argv[1]));
-		sql_result_value(context, argv[0]);
-		return;
+		assert(! sql_value_is_null(&argv[1]));
+		sqlVdbeMemCopy(result, &argv[0]);
+		port_vdbemem_create(ret, result, 1);
+		return 0;
 	}
-	assert(zPattern == sql_value_text(argv[1]));	/* No encoding change */
-	zRep = sql_value_text(argv[2]);
-	if (zRep == 0)
-		return;
-	nRep = sql_value_bytes(argv[2]);
-	assert(zRep == sql_value_text(argv[2]));
+	assert(zPattern == sql_value_text(&argv[1]));	/* No encoding change */
+
+	zRep = sql_value_text(&argv[2]);
+	if (zRep == 0) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
+
+	nRep = sql_value_bytes(&argv[2]);
+	assert(zRep == sql_value_text(&argv[2]));
 	nOut = nStr + 1;
 	assert(nOut < SQL_MAX_LENGTH);
-	zOut = contextMalloc(context, (i64) nOut);
+	zOut = contextMalloc(func->context, (i64) nOut);
 	if (zOut == 0) {
-		return;
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
 	}
 	loopLimit = nStr - nPattern;
 	for (i = j = 0; i <= loopLimit; i++) {
@@ -1603,23 +1887,21 @@ replaceFunc(sql_context * context, int argc, sql_value ** argv)
 			zOut[j++] = zStr[i];
 		} else {
 			u8 *zOld;
-			sql *db = sql_context_db_handle(context);
+			struct sql *db = sql_get();
 			nOut += nRep - nPattern;
 			testcase(nOut - 1 == db->aLimit[SQL_LIMIT_LENGTH]);
 			testcase(nOut - 2 == db->aLimit[SQL_LIMIT_LENGTH]);
 			if (nOut - 1 > db->aLimit[SQL_LIMIT_LENGTH]) {
 				diag_set(ClientError, ER_SQL_EXECUTE, "string "\
 					 "or binary string is too big");
-				context->is_aborted = true;
 				sql_free(zOut);
-				return;
+				return -1;
 			}
 			zOld = zOut;
 			zOut = sql_realloc64(zOut, (int)nOut);
 			if (zOut == 0) {
-				context->is_aborted = true;
 				sql_free(zOld);
-				return;
+				return -1;
 			}
 			memcpy(&zOut[j], zRep, nRep);
 			j += nRep;
@@ -1631,14 +1913,18 @@ replaceFunc(sql_context * context, int argc, sql_value ** argv)
 	j += nStr - i;
 	assert(j <= nOut);
 	zOut[j] = 0;
-	sql_result_text(context, (char *)zOut, j, sql_free);
+
+	if (sqlVdbeMemSetStr(result, (char *)zOut, j, 1, sql_free) != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /**
  * Remove characters included in @a trim_set from @a input_str
  * until encounter a character that doesn't belong to @a trim_set.
  * Remove from the side specified by @a flags.
- * @param context SQL context.
+ * @param result Mem that contains the result.
  * @param flags Trim specification: left, right or both.
  * @param trim_set The set of characters for trimming.
  * @param char_len Lengths of each UTF-8 character in @a trim_set.
@@ -1646,8 +1932,8 @@ replaceFunc(sql_context * context, int argc, sql_value ** argv)
  * @param input_str Input string for trimming.
  * @param input_str_sz Input string size in bytes.
  */
-static void
-trim_procedure(struct sql_context *context, enum trim_side_mask flags,
+static int
+trim_procedure(struct Mem *result, enum trim_side_mask flags,
 	       const unsigned char *trim_set, const uint8_t *char_len,
 	       int char_cnt, const unsigned char *input_str, int input_str_sz)
 {
@@ -1686,8 +1972,10 @@ trim_procedure(struct sql_context *context, enum trim_side_mask flags,
 		}
 	}
 finish:
-	sql_result_text(context, (char *)input_str, input_str_sz,
-			SQL_TRANSIENT);
+	if (sqlVdbeMemSetStr(result, (char *)input_str, input_str_sz, 1,
+			     SQL_TRANSIENT) != 0)
+		return -1;
+	return 0;
 }
 
 /**
@@ -1739,14 +2027,16 @@ trim_prepare_char_len(struct sql_context *context,
  * Call trimming procedure with TRIM_BOTH as the flags and " " as
  * the trimming set.
  */
-static void
-trim_func_one_arg(struct sql_context *context, sql_value *arg)
+static int
+trim_func_one_arg(sql_value *arg, struct Mem *result)
 {
 	/* In case of VARBINARY type default trim octet is X'00'. */
 	const unsigned char *default_trim;
 	enum mp_type val_type = sql_value_type(arg);
-	if (val_type == MP_NIL)
-		return;
+	if (val_type == MP_NIL) {
+		sqlVdbeMemSetNull(result);
+		return 0;
+	}
 	if (mp_type_is_bloblike(val_type))
 		default_trim = (const unsigned char *) "\0";
 	else
@@ -1754,8 +2044,8 @@ trim_func_one_arg(struct sql_context *context, sql_value *arg)
 	int input_str_sz = sql_value_bytes(arg);
 	const unsigned char *input_str = sql_value_text(arg);
 	uint8_t trim_char_len[1] = { 1 };
-	trim_procedure(context, TRIM_BOTH, default_trim, trim_char_len, 1,
-		       input_str, input_str_sz);
+	return trim_procedure(result, TRIM_BOTH, default_trim, trim_char_len, 1,
+			      input_str, input_str_sz);
 }
 
 /**
@@ -1769,31 +2059,36 @@ trim_func_one_arg(struct sql_context *context, sql_value *arg)
  * If user has specified side keyword only, then call trimming
  * procedure with the specified side and " " as the trimming set.
  */
-static void
+static int
 trim_func_two_args(struct sql_context *context, sql_value *arg1,
-		   sql_value *arg2)
+		   sql_value *arg2, struct Mem *result)
 {
 	const unsigned char *input_str, *trim_set;
-	if ((input_str = sql_value_text(arg2)) == NULL)
-		return;
+	if ((input_str = sql_value_text(arg2)) == NULL) {
+		sqlVdbeMemSetNull(result);
+		return 0;
+	}
 
 	int input_str_sz = sql_value_bytes(arg2);
 	if (sql_value_type(arg1) == MP_INT || sql_value_type(arg1) == MP_UINT) {
 		uint8_t len_one = 1;
-		trim_procedure(context, sql_value_int(arg1),
-			       (const unsigned char *) " ", &len_one, 1,
-			       input_str, input_str_sz);
+		return trim_procedure(result, sql_value_int(arg1),
+				      (const unsigned char *) " ", &len_one, 1,
+				      input_str, input_str_sz);
 	} else if ((trim_set = sql_value_text(arg1)) != NULL) {
 		int trim_set_sz = sql_value_bytes(arg1);
 		uint8_t *char_len;
 		int char_cnt = trim_prepare_char_len(context, trim_set,
 						     trim_set_sz, &char_len);
 		if (char_cnt == -1)
-			return;
-		trim_procedure(context, TRIM_BOTH, trim_set, char_len, char_cnt,
-			       input_str, input_str_sz);
+			return -1;
+		int rc = trim_procedure(result, TRIM_BOTH, trim_set, char_len,
+					char_cnt, input_str, input_str_sz);
 		sql_free(char_len);
+		return rc;
 	}
+	sqlVdbeMemSetNull(result);
+	return 0;
 }
 
 /**
@@ -1803,15 +2098,17 @@ trim_func_two_args(struct sql_context *context, sql_value *arg1,
  * If user has specified side keyword and <character_set>, then
  * call trimming procedure with that args.
  */
-static void
+static int
 trim_func_three_args(struct sql_context *context, sql_value *arg1,
-		     sql_value *arg2, sql_value *arg3)
+		     sql_value *arg2, sql_value *arg3, struct Mem *result)
 {
 	assert(sql_value_type(arg1) == MP_INT || sql_value_type(arg1) == MP_UINT);
 	const unsigned char *input_str, *trim_set;
 	if ((input_str = sql_value_text(arg3)) == NULL ||
-	    (trim_set = sql_value_text(arg2)) == NULL)
-		return;
+	    (trim_set = sql_value_text(arg2)) == NULL) {
+		sqlVdbeMemSetNull(result);
+		return 0;
+	}
 
 	int trim_set_sz = sql_value_bytes(arg2);
 	int input_str_sz = sql_value_bytes(arg3);
@@ -1819,10 +2116,11 @@ trim_func_three_args(struct sql_context *context, sql_value *arg1,
 	int char_cnt = trim_prepare_char_len(context, trim_set, trim_set_sz,
 					     &char_len);
 	if (char_cnt == -1)
-		return;
-	trim_procedure(context, sql_value_int(arg1), trim_set, char_len,
-		       char_cnt, input_str, input_str_sz);
+		return -1;
+	int rc = trim_procedure(result, sql_value_int(arg1), trim_set, char_len,
+				char_cnt, input_str, input_str_sz);
 	sql_free(char_len);
+	return rc;
 }
 
 /**
@@ -1832,24 +2130,41 @@ trim_func_three_args(struct sql_context *context, sql_value *arg1,
  * This is a dispatcher function that calls corresponding
  * implementation depending on the number of arguments.
 */
-static void
-trim_func(struct sql_context *context, int argc, sql_value **argv)
+static int
+sql_func_trim(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
+	struct Mem *result = sqlValueNew(sql_get());
+	int rc = 0;
 	switch (argc) {
 	case 1:
-		trim_func_one_arg(context, argv[0]);
+		rc = trim_func_one_arg(&argv[0], result);
 		break;
 	case 2:
-		trim_func_two_args(context, argv[0], argv[1]);
+		rc = trim_func_two_args(func->context, &argv[0], &argv[1],
+					result);
 		break;
 	case 3:
-		trim_func_three_args(context, argv[0], argv[1], argv[2]);
+		rc = trim_func_three_args(func->context, &argv[0], &argv[1],
+					  &argv[2], result);
 		break;
 	default:
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT, "TRIM",
 			 "1 or 2 or 3", argc);
-		context->is_aborted = true;
+		return -1;
 	}
+	if (rc != 0)
+		return -1;
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -1858,10 +2173,19 @@ trim_func(struct sql_context *context, int argc, sql_value **argv)
  * IMP: R-59782-00072 The soundex(X) function returns a string that is the
  * soundex encoding of the string X.
  */
-static void
-soundexFunc(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_soundex(struct func *base, struct port *args, struct port *ret)
 {
-	(void) argc;
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
 	char zResult[8];
 	const u8 *zIn;
 	int i, j;
@@ -1875,19 +2199,18 @@ soundexFunc(sql_context * context, int argc, sql_value ** argv)
 		0, 0, 1, 2, 3, 0, 1, 2, 0, 0, 2, 2, 4, 5, 5, 0,
 		1, 2, 6, 2, 3, 0, 1, 0, 2, 0, 2, 0, 0, 0, 0, 0,
 	};
-	assert(argc == 1);
-	enum mp_type mp_type = sql_value_type(argv[0]);
+	enum mp_type mp_type = sql_value_type(&argv[0]);
 	if (mp_type_is_bloblike(mp_type)) {
 		diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
-			 sql_value_to_diag_str(argv[0]), "text");
-		context->is_aborted = true;
-		return;
+			 sql_value_to_diag_str(&argv[0]), "text");
+		return -1;
 	}
-	zIn = (u8 *) sql_value_text(argv[0]);
+	zIn = (u8 *) sql_value_text(&argv[0]);
 	if (zIn == 0)
 		zIn = (u8 *) "";
 	for (i = 0; zIn[i] && !sqlIsalpha(zIn[i]); i++) {
 	}
+	struct Mem *result = sqlValueNew(sql_get());
 	if (zIn[i]) {
 		u8 prevcode = iCode[zIn[i] & 0x7f];
 		zResult[0] = sqlToupper(zIn[i]);
@@ -1906,13 +2229,17 @@ soundexFunc(sql_context * context, int argc, sql_value ** argv)
 			zResult[j++] = '0';
 		}
 		zResult[j] = 0;
-		sql_result_text(context, zResult, 4, SQL_TRANSIENT);
+		if (sqlVdbeMemSetStr(result, zResult, 4, 1, SQL_TRANSIENT) != 0)
+			return -1;
 	} else {
 		/* IMP: R-64894-50321 The string "?000" is returned if the argument
 		 * is NULL or contains no ASCII alphabetic characters.
 		 */
-		sql_result_text(context, "?000", 4, SQL_STATIC);
+		if (sqlVdbeMemSetStr(result, "?000", 4, 1, SQL_STATIC) != 0)
+			return -1;
 	}
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 /*
@@ -1940,27 +2267,36 @@ struct SumCtx {
  * value.  TOTAL never fails, but SUM might through an exception if
  * it overflows an integer.
  */
-static void
-sum_step(struct sql_context *context, int argc, sql_value **argv)
+static int
+sql_func_sum_step(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
 	assert(argc == 1);
-	UNUSED_PARAMETER(argc);
-	struct SumCtx *p = sql_aggregate_context(context, sizeof(*p));
-	int type = sql_value_type(argv[0]);
-	if (type == MP_NIL || p == NULL)
-		return;
+
+	struct SumCtx *p = sql_aggregate_context(func->context, sizeof(*p));
+	int type = sql_value_type(&argv[0]);
+	if (type == MP_NIL || p == NULL) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 	if (type != MP_DOUBLE && type != MP_INT && type != MP_UINT) {
-		if (mem_apply_numeric_type(argv[0]) != 0) {
+		if (mem_apply_numeric_type(&argv[0]) != 0) {
 			diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
-				 sql_value_to_diag_str(argv[0]), "number");
-			context->is_aborted = true;
-			return;
+				 sql_value_to_diag_str(&argv[0]), "number");
+			return -1;
 		}
-		type = sql_value_type(argv[0]);
+		type = sql_value_type(&argv[0]);
 	}
 	p->cnt++;
 	if (type == MP_INT || type == MP_UINT) {
-		int64_t v = sql_value_int64(argv[0]);
+		int64_t v = sql_value_int64(&argv[0]);
 		if (type == MP_INT)
 			p->rSum += v;
 		else
@@ -1971,9 +2307,11 @@ sum_step(struct sql_context *context, int argc, sql_value **argv)
 			p->overflow = 1;
 		}
 	} else {
-		p->rSum += sql_value_double(argv[0]);
+		p->rSum += sql_value_double(&argv[0]);
 		p->approx = 1;
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 static void
@@ -2024,20 +2362,30 @@ struct CountCtx {
 /*
  * Routines to implement the count() aggregate function.
  */
-static void
-countStep(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_count_step(struct func *base, struct port *args, struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	CountCtx *p;
 	if (argc != 0 && argc != 1) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT,
 			 "COUNT", "0 or 1", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	p = sql_aggregate_context(context, sizeof(*p));
-	if ((argc == 0 || ! sql_value_is_null(argv[0])) && p) {
+	p = sql_aggregate_context(func->context, sizeof(*p));
+	if ((argc == 0 || ! sql_value_is_null(&argv[0])) && p) {
 		p->n++;
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 static void
@@ -2051,25 +2399,34 @@ countFinalize(sql_context * context)
 /*
  * Routines to implement min() and max() aggregate functions.
  */
-static void
-minmaxStep(sql_context * context, int NotUsed, sql_value ** argv)
+static int
+sql_func_min_max_step(struct func *base, struct port *args, struct port *ret)
 {
-	Mem *pArg = (Mem *) argv[0];
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+	assert(argc == 1);
+
+	Mem *pArg = &argv[0];
 	Mem *pBest;
-	UNUSED_PARAMETER(NotUsed);
 
-	struct func_sql_builtin *func =
-		(struct func_sql_builtin *)context->func;
-	pBest = (Mem *) sql_aggregate_context(context, sizeof(*pBest));
-	if (!pBest)
-		return;
+	pBest = (Mem *) sql_aggregate_context(func->context, sizeof(*pBest));
+	if (!pBest) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 
-	if (sql_value_is_null(argv[0])) {
+	if (sql_value_is_null(&argv[0])) {
 		if (pBest->flags)
-			sqlSkipAccumulatorLoad(context);
+			sqlSkipAccumulatorLoad(func->context);
 	} else if (pBest->flags) {
 		int cmp;
-		struct coll *pColl = sqlGetFuncCollSeq(context);
+		struct coll *pColl = sqlGetFuncCollSeq(func->context);
 		/*
 		 * This step function is used for both the min()
 		 * and max() aggregates, the only difference
@@ -2081,12 +2438,14 @@ minmaxStep(sql_context * context, int NotUsed, sql_value ** argv)
 		if ((is_max && cmp < 0) || (!is_max && cmp > 0)) {
 			sqlVdbeMemCopy(pBest, pArg);
 		} else {
-			sqlSkipAccumulatorLoad(context);
+			sqlSkipAccumulatorLoad(func->context);
 		}
 	} else {
-		pBest->db = sql_context_db_handle(context);
+		pBest->db = sql_get();
 		sqlVdbeMemCopy(pBest, pArg);
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 static void
@@ -2105,9 +2464,19 @@ minMaxFinalize(sql_context * context)
 /*
  * group_concat(EXPR, ?SEPARATOR?)
  */
-static void
-groupConcatStep(sql_context * context, int argc, sql_value ** argv)
+static int
+sql_func_group_concat_step(struct func *base, struct port *args,
+			   struct port *ret)
 {
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	struct func_sql_builtin *func = (struct func_sql_builtin *)base;
+	uint32_t argc;
+	struct Mem *argv = port_get_vdbemem(args, &argc);
+
 	const char *zVal;
 	StrAccum *pAccum;
 	const char *zSep;
@@ -2115,22 +2484,23 @@ groupConcatStep(sql_context * context, int argc, sql_value ** argv)
 	if (argc != 1 && argc != 2) {
 		diag_set(ClientError, ER_FUNC_WRONG_ARG_COUNT,
 			 "GROUP_CONCAT", "1 or 2", argc);
-		context->is_aborted = true;
-		return;
+		return -1;
 	}
-	if (sql_value_is_null(argv[0]))
-		return;
+	if (sql_value_is_null(&argv[0])) {
+		port_vdbemem_create(ret, NULL, 0);
+		return 0;
+	}
 	pAccum =
-	    (StrAccum *) sql_aggregate_context(context, sizeof(*pAccum));
+	    (StrAccum *) sql_aggregate_context(func->context, sizeof(*pAccum));
 
 	if (pAccum) {
-		sql *db = sql_context_db_handle(context);
+		sql *db = sql_get();
 		int firstTerm = pAccum->mxAlloc == 0;
 		pAccum->mxAlloc = db->aLimit[SQL_LIMIT_LENGTH];
 		if (!firstTerm) {
 			if (argc == 2) {
-				zSep = (char *)sql_value_text(argv[1]);
-				nSep = sql_value_bytes(argv[1]);
+				zSep = (char *)sql_value_text(&argv[1]);
+				nSep = sql_value_bytes(&argv[1]);
 			} else {
 				zSep = ",";
 				nSep = 1;
@@ -2138,11 +2508,13 @@ groupConcatStep(sql_context * context, int argc, sql_value ** argv)
 			if (zSep)
 				sqlStrAccumAppend(pAccum, zSep, nSep);
 		}
-		zVal = (char *)sql_value_text(argv[0]);
-		nVal = sql_value_bytes(argv[0]);
+		zVal = (char *)sql_value_text(&argv[0]);
+		nVal = sql_value_bytes(&argv[0]);
 		if (zVal)
 			sqlStrAccumAppend(pAccum, zVal, nVal);
 	}
+	port_vdbemem_create(ret, NULL, 0);
+	return 0;
 }
 
 static void
@@ -2163,6 +2535,25 @@ groupConcatFinalize(sql_context * context)
 					    pAccum->nChar, sql_free);
 		}
 	}
+}
+
+/**
+ * Return the number of affected rows in the last SQL statement.
+ */
+static int
+sql_func_row_count(struct func *base, struct port *args, struct port *ret)
+{
+	if (args->vtab != &port_vdbemem_vtab) {
+		diag_set(ClientError, ER_UNSUPPORTED, "sql builtin function",
+			 "Lua frontend");
+		return -1;
+	}
+	(void)base;
+
+	struct Mem *result = sqlValueNew(sql_get());
+	mem_set_u64(result, sql_get()->nChange);
+	port_vdbemem_create(ret, result, 1);
+	return 0;
 }
 
 int
@@ -2191,23 +2582,21 @@ sql_func_by_signature(const char *name, int argc)
 }
 
 static int
-func_sql_builtin_call_stub(struct func *func, struct port *args,
-			   struct port *ret)
+sql_func_stub(struct func *base, struct port *args, struct port *ret)
 {
-	(void) func; (void) args; (void) ret;
-	diag_set(ClientError, ER_UNSUPPORTED,
-		 "sql builtin function", "Lua frontend");
+	(void)args;
+	(void)ret;
+	diag_set(ClientError, ER_SQL_EXECUTE,
+		 tt_sprintf("function '%s' is not implemented",
+			    base->def->name));
 	return -1;
 }
 
 static void
-sql_builtin_stub(sql_context *ctx, int argc, sql_value **argv)
+func_sql_builtin_destroy(struct func *func)
 {
-	(void) argc; (void) argv;
-	diag_set(ClientError, ER_SQL_EXECUTE,
-		 tt_sprintf("function '%s' is not implemented",
-			    ctx->func->def->name));
-	ctx->is_aborted = true;
+	assert(func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
+	free(func);
 }
 
 /**
@@ -2222,7 +2611,7 @@ static struct {
 	const char *name;
 	/** Members below are related to struct func_sql_builtin. */
 	uint16_t flags;
-	void (*call)(sql_context *ctx, int argc, sql_value **argv);
+	struct func_vtab vtab;
 	void (*finalize)(sql_context *ctx);
 	/** Members below are related to struct func_def. */
 	bool is_deterministic;
@@ -2237,9 +2626,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = absFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_abs, func_sql_builtin_destroy},
 	}, {
 	 .name = "AVG",
 	 .param_count = 1,
@@ -2247,13 +2636,13 @@ static struct {
 	 .is_deterministic = false,
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .flags = 0,
-	 .call = sum_step,
 	 .finalize = avgFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_sum_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "CEIL",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2262,8 +2651,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "CEILING",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2277,9 +2666,9 @@ static struct {
 	 .is_deterministic = true,
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .flags = 0,
-	 .call = charFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_char, func_sql_builtin_destroy},
 	 }, {
 	 .name = "CHARACTER_LENGTH",
 	 .param_count = 1,
@@ -2287,9 +2676,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = lengthFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_length, func_sql_builtin_destroy},
 	}, {
 	 .name = "CHAR_LENGTH",
 	 .param_count = 1,
@@ -2297,9 +2686,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = lengthFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_length, func_sql_builtin_destroy},
 	}, {
 	 .name = "COALESCE",
 	 .param_count = -1,
@@ -2307,9 +2696,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_COALESCE,
-	 .call = sql_builtin_stub,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	}, {
 	 .name = "COUNT",
 	 .param_count = -1,
@@ -2317,13 +2706,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = countStep,
 	 .finalize = countFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_count_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "CURRENT_DATE",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2332,8 +2721,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "CURRENT_TIME",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2342,8 +2731,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "CURRENT_TIMESTAMP",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2352,8 +2741,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "DATE",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2362,8 +2751,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "DATETIME",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2372,8 +2761,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "EVERY",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2382,8 +2771,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "EXISTS",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2392,8 +2781,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "EXP",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2402,8 +2791,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "EXTRACT",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2412,8 +2801,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "FLOOR",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2422,8 +2811,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "GREATER",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2437,9 +2826,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_NEEDCOLL | SQL_FUNC_MAX,
-	 .call = minmaxFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_least_greatest, func_sql_builtin_destroy},
 	}, {
 	 .name = "GROUP_CONCAT",
 	 .param_count = -1,
@@ -2447,9 +2836,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = groupConcatStep,
 	 .finalize = groupConcatFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_group_concat_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "HEX",
 	 .param_count = 1,
@@ -2457,9 +2846,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = hexFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_hex, func_sql_builtin_destroy},
 	}, {
 	 .name = "IFNULL",
 	 .param_count = 2,
@@ -2467,13 +2856,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_COALESCE,
-	 .call = sql_builtin_stub,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	}, {
 	 .name = "JULIANDAY",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2487,9 +2876,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_NEEDCOLL | SQL_FUNC_MIN,
-	 .call = minmaxFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_least_greatest, func_sql_builtin_destroy},
 	}, {
 	 .name = "LENGTH",
 	 .param_count = 1,
@@ -2497,13 +2886,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_LENGTH,
-	 .call = lengthFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_length, func_sql_builtin_destroy},
 	}, {
 	 .name = "LESSER",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2517,9 +2906,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_NEEDCOLL | SQL_FUNC_LIKE,
-	 .call = likeFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_like, func_sql_builtin_destroy},
 	}, {
 	 .name = "LIKELIHOOD",
 	 .param_count = 2,
@@ -2527,9 +2916,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_UNLIKELY,
-	 .call = sql_builtin_stub,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	}, {
 	 .name = "LIKELY",
 	 .param_count = 1,
@@ -2537,13 +2926,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_UNLIKELY,
-	 .call = sql_builtin_stub,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	}, {
 	 .name = "LN",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2557,9 +2946,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_DERIVEDCOLL | SQL_FUNC_NEEDCOLL,
-	 .call = LowerICUFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_lower, func_sql_builtin_destroy},
 	}, {
 	 .name = "MAX",
 	 .param_count = 1,
@@ -2567,9 +2956,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = SQL_FUNC_NEEDCOLL | SQL_FUNC_MAX,
-	 .call = minmaxStep,
 	 .finalize = minMaxFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_min_max_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "MIN",
 	 .param_count = 1,
@@ -2577,13 +2966,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = SQL_FUNC_NEEDCOLL | SQL_FUNC_MIN,
-	 .call = minmaxStep,
 	 .finalize = minMaxFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_min_max_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "MOD",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2597,13 +2986,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_NEEDCOLL,
-	 .call = nullifFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_nullif, func_sql_builtin_destroy},
 	}, {
 	 .name = "OCTET_LENGTH",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2617,13 +3006,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_NEEDCOLL,
-	 .call = position_func,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_position, func_sql_builtin_destroy},
 	}, {
 	 .name = "POWER",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2637,9 +3026,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = printfFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_printf, func_sql_builtin_destroy},
 	}, {
 	 .name = "QUOTE",
 	 .param_count = 1,
@@ -2647,9 +3036,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = quoteFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_quote, func_sql_builtin_destroy},
 	}, {
 	 .name = "RANDOM",
 	 .param_count = 0,
@@ -2657,9 +3046,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = randomFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_random, func_sql_builtin_destroy},
 	}, {
 	 .name = "RANDOMBLOB",
 	 .param_count = 1,
@@ -2667,9 +3056,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = randomBlob,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_randomblob, func_sql_builtin_destroy},
 	}, {
 	 .name = "REPLACE",
 	 .param_count = 3,
@@ -2677,9 +3066,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_DERIVEDCOLL,
-	 .call = replaceFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_replace, func_sql_builtin_destroy},
 	}, {
 	 .name = "ROUND",
 	 .param_count = -1,
@@ -2687,9 +3076,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = roundFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_round, func_sql_builtin_destroy},
 	}, {
 	 .name = "ROW_COUNT",
 	 .param_count = 0,
@@ -2697,13 +3086,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = sql_row_count,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_row_count, func_sql_builtin_destroy},
 	}, {
 	 .name = "SOME",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2717,13 +3106,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = soundexFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_soundex, func_sql_builtin_destroy},
 	}, {
 	 .name = "SQRT",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2732,8 +3121,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "STRFTIME",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2747,9 +3136,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_DERIVEDCOLL,
-	 .call = substrFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_substr, func_sql_builtin_destroy},
 	}, {
 	 .name = "SUM",
 	 .param_count = 1,
@@ -2757,13 +3146,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = sum_step,
 	 .finalize = sumFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_sum_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "TIME",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2777,9 +3166,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_GROUP,
 	 .is_deterministic = false,
 	 .flags = 0,
-	 .call = sum_step,
 	 .finalize = totalFinalize,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_sum_step, func_sql_builtin_destroy},
 	}, {
 	 .name = "TRIM",
 	 .param_count = -1,
@@ -2787,9 +3176,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_DERIVEDCOLL,
-	 .call = trim_func,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_trim, func_sql_builtin_destroy},
 	}, {
 	 .name = "TYPEOF",
 	 .param_count = 1,
@@ -2797,9 +3186,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_TYPEOF,
-	 .call = typeofFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_typeof, func_sql_builtin_destroy},
 	}, {
 	 .name = "UNICODE",
 	 .param_count = 1,
@@ -2807,9 +3196,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = unicodeFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_unicode, func_sql_builtin_destroy},
 	}, {
 	 .name = "UNLIKELY",
 	 .param_count = 1,
@@ -2817,9 +3206,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_UNLIKELY,
-	 .call = sql_builtin_stub,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	}, {
 	 .name = "UPPER",
 	 .param_count = 1,
@@ -2827,9 +3216,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = SQL_FUNC_DERIVEDCOLL | SQL_FUNC_NEEDCOLL,
-	 .call = UpperICUFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_upper, func_sql_builtin_destroy},
 	}, {
 	 .name = "VERSION",
 	 .param_count = 0,
@@ -2837,9 +3226,9 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = sql_func_version,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_version, func_sql_builtin_destroy},
 	}, {
 	 .name = "ZEROBLOB",
 	 .param_count = 1,
@@ -2847,13 +3236,13 @@ static struct {
 	 .aggregate = FUNC_AGGREGATE_NONE,
 	 .is_deterministic = true,
 	 .flags = 0,
-	 .call = zeroblobFunc,
 	 .finalize = NULL,
 	 .export_to_sql = true,
+	 .vtab = {sql_func_zeroblob, func_sql_builtin_destroy},
 	}, {
 	 .name = "_sql_stat_get",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2862,8 +3251,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "_sql_stat_init",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2872,8 +3261,8 @@ static struct {
 	 .finalize = NULL,
 	}, {
 	 .name = "_sql_stat_push",
-	 .call = sql_builtin_stub,
 	 .export_to_sql = false,
+	 .vtab = {sql_func_stub, func_sql_builtin_destroy},
 	 .param_count = -1,
 	 .returns = FIELD_TYPE_ANY,
 	 .aggregate = FUNC_AGGREGATE_NONE,
@@ -2882,8 +3271,6 @@ static struct {
 	 .finalize = NULL,
 	},
 };
-
-static struct func_vtab func_sql_builtin_vtab;
 
 struct func *
 func_sql_builtin_new(struct func_def *def)
@@ -2922,9 +3309,8 @@ func_sql_builtin_new(struct func_def *def)
 		return NULL;
 	}
 	func->base.def = def;
-	func->base.vtab = &func_sql_builtin_vtab;
+	func->base.vtab = &sql_builtins[idx].vtab;
 	func->flags = sql_builtins[idx].flags;
-	func->call = sql_builtins[idx].call;
 	func->finalize = sql_builtins[idx].finalize;
 	def->param_count = sql_builtins[idx].param_count;
 	def->is_deterministic = sql_builtins[idx].is_deterministic;
@@ -2933,16 +3319,3 @@ func_sql_builtin_new(struct func_def *def)
 	def->exports.sql = sql_builtins[idx].export_to_sql;
 	return &func->base;
 }
-
-static void
-func_sql_builtin_destroy(struct func *func)
-{
-	assert(func->vtab == &func_sql_builtin_vtab);
-	assert(func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
-	free(func);
-}
-
-static struct func_vtab func_sql_builtin_vtab = {
-	.call = func_sql_builtin_call_stub,
-	.destroy = func_sql_builtin_destroy,
-};

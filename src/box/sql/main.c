@@ -219,15 +219,6 @@ setupLookaside(sql * db, void *pBuf, int sz, int cnt)
 	return 0;
 }
 
-void
-sql_row_count(struct sql_context *context, MAYBE_UNUSED int unused1,
-	      MAYBE_UNUSED sql_value **unused2)
-{
-	sql *db = sql_context_db_handle(context);
-	assert(db->nChange >= 0);
-	sql_result_uint(context, db->nChange);
-}
-
 /*
  * Close all open savepoints.
  * This procedure is trivial as savepoints are allocated on the "region" and

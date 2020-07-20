@@ -1902,15 +1902,24 @@ case OP_BuiltinFunction: {
 	assert(pCtx->func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
 	struct func_sql_builtin *func = (struct func_sql_builtin *)pCtx->func;
 	func->context = pCtx;
-	func->call(pCtx, pCtx->argc, pCtx->argv);
 
-	/* If the function returned an error, throw an exception */
-	if (pCtx->is_aborted)
+	struct port args, ret;
+	port_vdbemem_create(&args, &aMem[pOp->p2], pCtx->argc);
+	if (func_call(pCtx->func, &args, &ret) != 0)
 		goto abort_due_to_error;
+
+	uint32_t size = 0;
+	struct Mem *result = port_get_vdbemem(&ret, &size);
+	if (result != NULL) {
+		sqlVdbeMemCopy(pOut, result);
+		sqlDbFree(db, result);
+	} else {
+		sqlVdbeMemSetNull(pOut);
+	}
 
 	/* Copy the result of the function into register P3 */
 	if (pOut->flags & (MEM_Str|MEM_Blob)) {
-		if (sqlVdbeMemTooBig(pCtx->pOut)) goto too_big;
+		if (sqlVdbeMemTooBig(pOut)) goto too_big;
 	}
 
 	REGISTER_TRACE(p, pOp->p3, pCtx->pOut);
@@ -5224,11 +5233,12 @@ case OP_AggStep: {
 	assert(pCtx->func->def->language == FUNC_LANGUAGE_SQL_BUILTIN);
 	struct func_sql_builtin *func = (struct func_sql_builtin *)pCtx->func;
 	func->context = pCtx;
-	func->call(pCtx, pCtx->argc, pCtx->argv);
-	if (pCtx->is_aborted) {
-		sqlVdbeMemRelease(&t);
+
+	struct port args, ret;
+	port_vdbemem_create(&args, &aMem[pOp->p2], pCtx->argc);
+	if (func_call(pCtx->func, &args, &ret) != 0)
 		goto abort_due_to_error;
-	}
+
 	assert(t.flags==MEM_Null);
 	if (pCtx->skipFlag) {
 		assert(pOp[-1].opcode==OP_CollSeq);
