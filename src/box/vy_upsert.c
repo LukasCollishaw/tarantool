@@ -46,31 +46,101 @@
  * @retval 0 && *result_stmt == NULL : unsquashable sources
  * @retval -1 - memory error
  */
-static int
-vy_upsert_try_to_squash(struct tuple_format *format,
-			const char *key_mp, const char *key_mp_end,
-			const char *old_serie, const char *old_serie_end,
-			const char *new_serie, const char *new_serie_end,
-			struct tuple **result_stmt)
+//static int
+//vy_upsert_try_to_squash(struct tuple_format *format,
+//			const char *key_mp, const char *key_mp_end,
+//			const char *old_serie, const char *old_serie_end,
+//			const char *new_serie, const char *new_serie_end,
+//			struct tuple **result_stmt)
+//{
+//	*result_stmt = NULL;
+//
+//	size_t squashed_size;
+//	const char *squashed =
+//		xrow_upsert_squash(old_serie, old_serie_end,
+//				   new_serie, new_serie_end, format,
+//				   &squashed_size, 0);
+//	if (squashed == NULL)
+//		return 0;
+//	/* Successful squash! */
+//	struct iovec operations[1];
+//	operations[0].iov_base = (void *)squashed;
+//	operations[0].iov_len = squashed_size;
+//
+//	*result_stmt = vy_stmt_new_upsert(format, key_mp, key_mp_end,
+//					  operations, 1);
+//	if (*result_stmt == NULL)
+//		return -1;
+//	return 0;
+//}
+
+/**
+ * Check that key hasn't been changed after applying upsert operation.
+ */
+bool
+vy_apply_result_does_cross_pk(struct tuple *new_stmt, struct tuple *old_stmt,
+			      struct key_def *cmp_def, uint64_t col_mask)
 {
-	*result_stmt = NULL;
+	return (!key_update_can_be_skipped(cmp_def->column_mask, col_mask) &&
+		vy_stmt_compare(old_stmt, HINT_NONE, new_stmt, HINT_NONE, cmp_def));
+}
 
-	size_t squashed_size;
-	const char *squashed =
-		xrow_upsert_squash(old_serie, old_serie_end,
-				   new_serie, new_serie_end, format,
-				   &squashed_size, 0);
-	if (squashed == NULL)
-		return 0;
-	/* Successful squash! */
-	struct iovec operations[1];
-	operations[0].iov_base = (void *)squashed;
-	operations[0].iov_len = squashed_size;
+/**
+ * @cmp_def Key definition required to provide check of primary key
+ * modification.
+ **/
+static int
+vy_apply_upsert_on_terminal_stmt(struct tuple *new_stmt, struct tuple *old_stmt,
+				 struct key_def *cmp_def, struct tuple **result,
+				 bool suppress_error) {
+	assert(vy_stmt_type(new_stmt) == IPROTO_UPSERT);
+	assert(old_stmt == NULL || vy_stmt_type(old_stmt) != IPROTO_UPSERT);
 
-	*result_stmt = vy_stmt_new_upsert(format, key_mp, key_mp_end,
-					  operations, 1);
-	if (*result_stmt == NULL)
+	*result = NULL;
+	uint32_t mp_size;
+	const char *new_ops = vy_stmt_upsert_ops(new_stmt, &mp_size);
+	const char *new_ops_end = new_ops + mp_size;
+	const char *result_mp;
+	if (old_stmt != NULL && vy_stmt_type(old_stmt) != IPROTO_DELETE)
+		result_mp = tuple_data_range(old_stmt, &mp_size);
+	else
+		result_mp = vy_upsert_data_range(new_stmt, &mp_size);
+	const char *result_mp_end = result_mp + mp_size;
+	struct region *region = &fiber()->gc;
+	size_t region_svp = region_used(region);
+	uint64_t column_mask = COLUMN_MASK_FULL;
+	struct tuple_format *format = old_stmt != NULL ? tuple_format(old_stmt) : tuple_format(new_stmt);
+
+	if (old_stmt != NULL || vy_stmt_type(old_stmt) != IPROTO_DELETE) {
+		result_mp = xrow_upsert_execute(new_ops, new_ops_end, result_mp,
+						result_mp_end, format, &mp_size,
+						0, suppress_error, &column_mask);
+		if (result_mp == NULL) {
+			region_truncate(region, region_svp);
+			return -1;
+		}
+		result_mp_end = result_mp + mp_size;
+	}
+	struct tuple *ups_res = vy_stmt_new_replace(format, result_mp,
+						    result_mp_end);
+	region_truncate(region, region_svp);
+	if (ups_res == NULL)
 		return -1;
+	vy_stmt_set_lsn(ups_res, vy_stmt_lsn(new_stmt));
+	/*
+	 * If it turns out that resulting tuple modifies primary
+	 * key, than simply ignore this upsert.
+	 * TODO: integrate this check into xrow_upsert_execute()
+	 * so that *all* update operations of given upsert
+	 * are skipped.
+	 */
+	if (vy_apply_result_does_cross_pk(ups_res, old_stmt, cmp_def,
+					  column_mask)) {
+		say_error("PK MODIFIED!!!");
+		tuple_unref(ups_res);
+		ups_res = vy_stmt_dup(old_stmt);
+	}
+	*result = ups_res;
 	return 0;
 }
 
@@ -86,91 +156,71 @@ vy_apply_upsert(struct tuple *new_stmt, struct tuple *old_stmt,
 	assert(new_stmt != NULL);
 	assert(new_stmt != old_stmt);
 	assert(vy_stmt_type(new_stmt) == IPROTO_UPSERT);
+	say_error("new_stmt %s", vy_stmt_str(new_stmt));
+	say_error("old_stmt %s", vy_stmt_str(old_stmt));
 
-	if (old_stmt == NULL || vy_stmt_type(old_stmt) == IPROTO_DELETE) {
-		/*
-		 * INSERT case: return new stmt.
-		 */
-		return vy_stmt_replace_from_upsert(new_stmt);
-	}
 
-	struct tuple_format *format = tuple_format(new_stmt);
-
-	/*
-	 * Unpack UPSERT operation from the new stmt
-	 */
-	uint32_t mp_size;
-	const char *new_ops;
-	new_ops = vy_stmt_upsert_ops(new_stmt, &mp_size);
-	const char *new_ops_end = new_ops + mp_size;
-
-	/*
-	 * Apply new operations to the old stmt
-	 */
-	const char *result_mp;
-	if (vy_stmt_type(old_stmt) == IPROTO_UPSERT)
-		result_mp = vy_upsert_data_range(old_stmt, &mp_size);
-	else
-		result_mp = tuple_data_range(old_stmt, &mp_size);
-	const char *result_mp_end = result_mp + mp_size;
 	struct tuple *result_stmt = NULL;
 	struct region *region = &fiber()->gc;
 	size_t region_svp = region_used(region);
-	uint8_t old_type = vy_stmt_type(old_stmt);
-	uint64_t column_mask = COLUMN_MASK_FULL;
-	result_mp = xrow_upsert_execute(new_ops, new_ops_end, result_mp,
-					result_mp_end, format, &mp_size,
-					0, suppress_error, &column_mask);
-	if (result_mp == NULL) {
-		region_truncate(region, region_svp);
-		return NULL;
-	}
-	result_mp_end = result_mp + mp_size;
-	if (old_type != IPROTO_UPSERT) {
-		assert(old_type == IPROTO_INSERT ||
-		       old_type == IPROTO_REPLACE);
-		/*
-		 * UPDATE case: return the updated old stmt.
-		 */
-		result_stmt = vy_stmt_new_replace(format, result_mp,
-						  result_mp_end);
-		region_truncate(region, region_svp);
-		if (result_stmt == NULL)
-			return NULL; /* OOM */
-		vy_stmt_set_lsn(result_stmt, vy_stmt_lsn(new_stmt));
-		goto check_key;
+	if (old_stmt == NULL || vy_stmt_type(old_stmt) != IPROTO_UPSERT) {
+		/* INSERT case: return new stmt. */
+		if (vy_apply_upsert_on_terminal_stmt(new_stmt, old_stmt, cmp_def,
+						      &result_stmt,
+						      suppress_error) != 0)
+			return NULL;
+		say_error("terminal result %s", vy_stmt_str(result_stmt));
+		return result_stmt;
 	}
 
+	assert(vy_stmt_type(old_stmt) == IPROTO_UPSERT);
 	/*
 	 * Unpack UPSERT operation from the old stmt
 	 */
 	assert(old_stmt != NULL);
-	const char *old_ops;
-	old_ops = vy_stmt_upsert_ops(old_stmt, &mp_size);
+	uint32_t mp_size;
+	const char *old_ops = vy_stmt_upsert_ops(old_stmt, &mp_size);
 	const char *old_ops_end = old_ops + mp_size;
 	assert(old_ops_end > old_ops);
+	const char *new_ops = vy_stmt_upsert_ops(new_stmt, &mp_size);
+	const char *new_ops_end = new_ops + mp_size;
+
+	const char *old_stmt_mp = vy_upsert_data_range(old_stmt, &mp_size);
+	const char *old_stmt_mp_end = old_stmt_mp + mp_size;
 
 	/*
 	 * UPSERT + UPSERT case: combine operations
 	 */
-	assert(old_ops_end - old_ops > 0);
-	if (vy_upsert_try_to_squash(format, result_mp, result_mp_end,
-				    old_ops, old_ops_end, new_ops, new_ops_end,
-				    &result_stmt) != 0) {
-		region_truncate(region, region_svp);
-		return NULL;
-	}
-	if (result_stmt != NULL) {
-		region_truncate(region, region_svp);
-		vy_stmt_set_lsn(result_stmt, vy_stmt_lsn(new_stmt));
-		goto check_key;
-	}
+//	assert(old_ops_end - old_ops > 0);
+//	if (vy_upsert_try_to_squash(format, result_mp, result_mp_end,
+//				    old_ops, old_ops_end, new_ops, new_ops_end,
+//				    &result_stmt) != 0) {
+//		region_truncate(region, region_svp);
+//		return NULL;
+//	}
+//	if (result_stmt != NULL) {
+//		region_truncate(region, region_svp);
+//		vy_stmt_set_lsn(result_stmt, vy_stmt_lsn(new_stmt));
+//		goto check_key;
+//	}
 
-	/* Failed to squash, simply add one upsert to another */
+
+	/*
+	 * Adding update operations. We keep order of update operations in
+	 * the array the same (it is vital since first set of operations
+	 * must be skipped in case upsert folds into insert). Consider:
+	 * old_ops = {{op1}, {op2}, {op3}}
+	 * new_ops = {{op4}, {op5}}
+	 * res_ops = {{{op1}, {op2}, {op3}}, {{op4}, {op5}}}
+	 *
+	 */
 	int old_ops_cnt, new_ops_cnt;
 	struct iovec operations[3];
 
 	old_ops_cnt = mp_decode_array(&old_ops);
+	if (mp_typeof(old_ops) == MP_ARRAY) {
+		say_error("old_osp");
+	}
 	operations[1].iov_base = (void *)old_ops;
 	operations[1].iov_len = old_ops_end - old_ops;
 
@@ -183,26 +233,14 @@ vy_apply_upsert(struct tuple *new_stmt, struct tuple *old_stmt,
 	operations[0].iov_base = (void *)ops_buf;
 	operations[0].iov_len = header - ops_buf;
 
-	result_stmt = vy_stmt_new_upsert(format, result_mp, result_mp_end,
+	struct tuple_format *format = tuple_format(old_stmt);
+	result_stmt = vy_stmt_new_upsert(format, old_stmt_mp, old_stmt_mp_end,
 					 operations, 3);
 	region_truncate(region, region_svp);
 	if (result_stmt == NULL)
 		return NULL;
 	vy_stmt_set_lsn(result_stmt, vy_stmt_lsn(new_stmt));
+	say_error("upsert merger %s", vy_stmt_str(result_stmt));
 
-check_key:
-	/*
-	 * Check that key hasn't been changed after applying operations.
-	 */
-	if (!key_update_can_be_skipped(cmp_def->column_mask, column_mask) &&
-	    vy_stmt_compare(old_stmt, HINT_NONE, result_stmt,
-			    HINT_NONE, cmp_def) != 0) {
-		/*
-		 * Key has been changed: ignore this UPSERT and
-		 * @retval the old stmt.
-		 */
-		tuple_unref(result_stmt);
-		result_stmt = vy_stmt_dup(old_stmt);
-	}
 	return result_stmt;
 }
