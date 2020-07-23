@@ -35,6 +35,12 @@ before_script:
 
 # Jobs templates
 
+.artifacts_reject_files_template: &artifacts_reject_files_definition
+  artifacts:
+    when: always
+    paths:
+      - "test/*/*.reject"
+
 .deploy_only_template: &deploy_only_definition
   only:
     - master
@@ -62,12 +68,14 @@ before_script:
   stage: test
   tags:
     - docker_test
+  <<: *artifacts_reject_files_definition
 
 .docker_test_clang8_template: &docker_test_clang8_definition
   image: "${CI_REGISTRY}/${CI_PROJECT_PATH}/testing/debian-buster:latest"
   stage: test
   tags:
     - docker_test
+  <<: *artifacts_reject_files_definition
 
 .pack_template: &pack_definition
   <<: *pack_only_definition
@@ -84,6 +92,7 @@ before_script:
     - deploy_test
   script:
     - ${GITLAB_MAKE} package
+  <<: *artifacts_reject_files_definition
 
 .deploy_template: &deploy_definition
   <<: *deploy_only_definition
@@ -100,16 +109,19 @@ before_script:
     - deploy_test
   script:
     - ${GITLAB_MAKE} deploy
+  <<: *artifacts_reject_files_definition
 
 .osx_template: &osx_definition
   stage: test
   script:
     - ${GITLAB_MAKE} test_osx
+  <<: *artifacts_reject_files_definition
 
 .vbox_template: &vbox_definition
   stage: test
   after_script:
     - ${GITLAB_MAKE} vms_shutdown
+  <<: *artifacts_reject_files_definition
 
 .perf_docker_test_template: &perf_docker_test_definition
   <<: *perf_only_definition
@@ -540,3 +552,4 @@ static_docker_build:
     - deploy_test
   script:
     - ${GITLAB_MAKE} test_static_docker_build
+  <<: *artifacts_reject_files_definition
