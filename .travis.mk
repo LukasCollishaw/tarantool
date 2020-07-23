@@ -86,6 +86,7 @@ build_debian: configure_debian
 
 test_debian_no_deps: build_debian
 	cd test && /usr/bin/python test-run.py --force $(TEST_RUN_EXTRA_PARAMS)
+	ls -al test/*/*.reject
 
 test_debian: deps_debian test_debian_no_deps
 
@@ -211,7 +212,13 @@ test_osx_no_deps: build_osx
 		ulimit -u ${MAX_PROC} || : ; \
 		ulimit -u ; \
 		rm -rf /tmp/tnt ; \
-		cd test && ./test-run.py --vardir /tmp/tnt --force $(TEST_RUN_EXTRA_PARAMS)
+		cd test && ./test-run.py --vardir ${VARDIR} --force $(TEST_RUN_EXTRA_PARAMS)
+	echo "ALX ==================="
+	ls -al test/*/*.reject
+	echo "ALX 1 ==================="
+	ls -al /tmp/tnt/*/*.reject
+	echo "ALX 1 ==================="
+	find /tmp/tnt -name "*.reject" -exec ls -al {} \; -print
 
 test_osx: deps_osx test_osx_no_deps
 

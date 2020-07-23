@@ -12,6 +12,7 @@ variables:
   GITLAB_MAKE: "make -f .gitlab.mk"
   GIT_STRATEGY: none
   GIT_CLEAN_FLAGS: none
+  OSX_VARDIR: /tmp/tnt
 
 # 1. Git checkout strategy used from:
 #    https://docs.gitlab.com/ee/ci/yaml/README.html#git-checkout
@@ -115,6 +116,8 @@ before_script:
   stage: test
   script:
     - ${GITLAB_MAKE} test_osx
+  variables:
+    VARDIR: ${OSX_VARDIR}
   <<: *artifacts_reject_files_definition
 
 .vbox_template: &vbox_definition
@@ -205,9 +208,10 @@ osx_15_release:
 osx_15_release_lto:
   tags:
     - osx_15
-  variables:
-    EXTRA_ENV: 'export CMAKE_EXTRA_PARAMS=-DENABLE_LTO=ON ;'
   <<: *osx_definition
+  variables:
+    VARDIR: ${OSX_VARDIR}
+    CMAKE_EXTRA_PARAMS: -DENABLE_LTO=ON
 
 freebsd_12_release:
   <<: *vbox_definition
