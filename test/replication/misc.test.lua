@@ -1,4 +1,4 @@
-uuid = require('uuid')
+--uuid = require('uuid')
 test_run = require('test_run').new()
 
 box.schema.user.grant('guest', 'replication')
