@@ -12,7 +12,7 @@ variables:
   GITLAB_MAKE: "make -f .gitlab.mk"
   GIT_STRATEGY: none
   GIT_CLEAN_FLAGS: none
-  OSX_VARDIR: /tmp/tnt
+  OSX_VARDIR: test/var
 
 # 1. Git checkout strategy used from:
 #    https://docs.gitlab.com/ee/ci/yaml/README.html#git-checkout
