@@ -863,9 +863,8 @@ local function listen(uri)
         port = '/tmp/tarantool-console.sock'
     else
         local u = urilib.parse(tostring(uri))
-        print("---- "..tostring(uri))
         if u == nil or u.service == nil then
-            error('sage: console.listen("[host:]port")')
+            error('Usage: console.listen("[host:]port")')
         end
         host = u.host
         port = u.service or 3313
