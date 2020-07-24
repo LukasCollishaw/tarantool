@@ -41,6 +41,7 @@ before_script:
     when: always
     paths:
       - "test/*/*.reject"
+      - "${OSX_VARDIR}/*.reject"
 
 .deploy_only_template: &deploy_only_definition
   only:
