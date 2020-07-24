@@ -320,9 +320,15 @@ vy_stmt_new_with_ops(struct tuple_format *format, const char *tuple_begin,
 	const char *tmp = tuple_begin;
 	mp_decode_array(&tmp);
 
+	/*
+	 * ops are grouped in one extra array.
+	 * See vy_apply_upsert() for details.
+	 */
 	size_t ops_size = 0;
 	for (int i = 0; i < op_count; ++i)
 		ops_size += ops[i].iov_len;
+	if (op_count > 0)
+		ops_size += mp_sizeof_array(op_count);
 
 	struct tuple *stmt = NULL;
 	struct region *region = &fiber()->gc;
@@ -360,6 +366,8 @@ vy_stmt_new_with_ops(struct tuple_format *format, const char *tuple_begin,
 	field_map_build(&builder, wpos - field_map_size);
 	memcpy(wpos, tuple_begin, mpsize);
 	wpos += mpsize;
+	if (op_count > 0)
+		wpos = mp_encode_array(wpos, op_count);
 	for (struct iovec *op = ops, *end = ops + op_count;
 	     op != end; ++op) {
 		memcpy(wpos, op->iov_base, op->iov_len);
@@ -744,10 +752,11 @@ vy_stmt_decode(struct xrow_header *xrow, struct tuple_format *format)
 					    NULL, 0, request.type);
 		break;
 	case IPROTO_UPSERT:
+		request.ops_cnt = mp_decode_array(&request.ops);
 		ops.iov_base = (char *)request.ops;
 		ops.iov_len = request.ops_end - request.ops;
 		stmt = vy_stmt_new_upsert(format, request.tuple,
-					  request.tuple_end, &ops, 1);
+					  request.tuple_end, &ops, request.ops_cnt);
 		break;
 	default:
 		/* TODO: report filename. */

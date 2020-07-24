@@ -580,6 +580,9 @@ vy_stmt_upsert_ops(struct tuple *tuple, uint32_t *mp_size)
 	assert(vy_stmt_type(tuple) == IPROTO_UPSERT);
 	const char *mp = tuple_data(tuple);
 	mp_next(&mp);
+	char *buf = tt_static_buf();
+	mp_snprint(buf, 1024, mp);
+	say_error("UPS OPS %s", buf);
 	*mp_size = tuple_data(tuple) + tuple->bsize - mp;
 	return mp;
 }

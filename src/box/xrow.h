@@ -168,6 +168,7 @@ struct request {
 	uint32_t offset;
 	uint32_t limit;
 	uint32_t iterator;
+	uint32_t ops_cnt;
 	/** Search key. */
 	const char *key;
 	const char *key_end;
