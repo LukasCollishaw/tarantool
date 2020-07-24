@@ -310,7 +310,7 @@ void coro_stack_free (struct coro_stack *stack);
 # elif defined HAVE_SETJMP_H && defined HAVE_SIGALTSTACK
 #  define CORO_SJLJ 1
 # else
-error unknown or unsupported architecture
+//error unknown or unsupported architecture
 # endif
 #endif
 

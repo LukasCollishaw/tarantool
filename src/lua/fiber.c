@@ -302,7 +302,7 @@ lbox_fiber_statof(struct fiber *f, void *cb_ctx, bool backtrace)
 		lua_pushstring(L, "backtrace");
 		lua_newtable(L);
 		backtrace_foreach(fiber_backtrace_cb,
-				  f != fiber() ? &f->ctx : NULL, &tb_ctx);
+				  f != fiber() ? (*&f->ctx) : NULL, &tb_ctx);
 		lua_settable(L, -3);
 #endif /* ENABLE_BACKTRACE */
 	}

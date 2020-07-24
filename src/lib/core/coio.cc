@@ -712,7 +712,7 @@ coio_wait_cb(struct ev_loop *loop, ev_io *watcher, int revents)
 }
 
 int
-coio_wait(int fd, int events, double timeout)
+coio_wait(int fd, int events, double timeout) noexcept
 {
 	if (fiber_is_cancelled())
 		return 0;
@@ -734,7 +734,7 @@ coio_wait(int fd, int events, double timeout)
 	return wdata.revents & (EV_READ | EV_WRITE);
 }
 
-int coio_close(int fd)
+int coio_close(int fd) noexcept
 {
 	ev_io_closing(loop(), fd, EV_CUSTOM);
 	return close(fd);

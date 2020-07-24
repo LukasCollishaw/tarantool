@@ -1070,14 +1070,14 @@ boxk(int type, uint32_t space_id, const char *format, ...)
 }
 
 int
-box_return_tuple(box_function_ctx_t *ctx, box_tuple_t *tuple)
+box_return_tuple(box_function_ctx_t *ctx, box_tuple_t *tuple) noexcept
 {
 	return port_tuple_add(ctx->port, tuple);
 }
 
 /* schema_find_id()-like method using only public API */
 uint32_t
-box_space_id_by_name(const char *name, uint32_t len)
+box_space_id_by_name(const char *name, uint32_t len) noexcept
 {
 	if (len > BOX_NAME_MAX)
 		return BOX_ID_NIL;
@@ -1102,7 +1102,7 @@ box_space_id_by_name(const char *name, uint32_t len)
 }
 
 uint32_t
-box_index_id_by_name(uint32_t space_id, const char *name, uint32_t len)
+box_index_id_by_name(uint32_t space_id, const char *name, uint32_t len) noexcept
 {
 	if (len > BOX_NAME_MAX)
 		return BOX_ID_NIL;
@@ -1147,7 +1147,7 @@ int
 box_select(uint32_t space_id, uint32_t index_id,
 	   int iterator, uint32_t offset, uint32_t limit,
 	   const char *key, const char *key_end,
-	   struct port *port)
+	   struct port *port) noexcept
 {
 	(void)key_end;
 
@@ -1220,7 +1220,7 @@ box_select(uint32_t space_id, uint32_t index_id,
 
 int
 box_insert(uint32_t space_id, const char *tuple, const char *tuple_end,
-	   box_tuple_t **result)
+	   box_tuple_t **result) noexcept
 {
 	mp_tuple_assert(tuple, tuple_end);
 	struct request request;
@@ -1234,7 +1234,7 @@ box_insert(uint32_t space_id, const char *tuple, const char *tuple_end,
 
 int
 box_replace(uint32_t space_id, const char *tuple, const char *tuple_end,
-	    box_tuple_t **result)
+	    box_tuple_t **result) noexcept
 {
 	mp_tuple_assert(tuple, tuple_end);
 	struct request request;
@@ -1248,7 +1248,7 @@ box_replace(uint32_t space_id, const char *tuple, const char *tuple_end,
 
 int
 box_delete(uint32_t space_id, uint32_t index_id, const char *key,
-	   const char *key_end, box_tuple_t **result)
+	   const char *key_end, box_tuple_t **result) noexcept
 {
 	mp_tuple_assert(key, key_end);
 	struct request request;
@@ -1264,7 +1264,7 @@ box_delete(uint32_t space_id, uint32_t index_id, const char *key,
 int
 box_update(uint32_t space_id, uint32_t index_id, const char *key,
 	   const char *key_end, const char *ops, const char *ops_end,
-	   int index_base, box_tuple_t **result)
+	   int index_base, box_tuple_t **result) noexcept
 {
 	mp_tuple_assert(key, key_end);
 	mp_tuple_assert(ops, ops_end);
@@ -1285,7 +1285,7 @@ box_update(uint32_t space_id, uint32_t index_id, const char *key,
 int
 box_upsert(uint32_t space_id, uint32_t index_id, const char *tuple,
 	   const char *tuple_end, const char *ops, const char *ops_end,
-	   int index_base, box_tuple_t **result)
+	   int index_base, box_tuple_t **result) noexcept
 {
 	mp_tuple_assert(ops, ops_end);
 	mp_tuple_assert(tuple, tuple_end);
@@ -1335,7 +1335,7 @@ space_truncate(struct space *space)
 }
 
 int
-box_truncate(uint32_t space_id)
+box_truncate(uint32_t space_id) noexcept
 {
 	try {
 		struct space *space = space_cache_find_xc(space_id);
@@ -1401,7 +1401,7 @@ sequence_data_delete(uint32_t seq_id)
 }
 
 int
-box_sequence_next(uint32_t seq_id, int64_t *result)
+box_sequence_next(uint32_t seq_id, int64_t *result) noexcept
 {
 	struct sequence *seq = sequence_cache_find(seq_id);
 	if (seq == NULL)
@@ -1417,7 +1417,7 @@ box_sequence_next(uint32_t seq_id, int64_t *result)
 	return 0;
 }
 int
-box_sequence_set(uint32_t seq_id, int64_t value)
+box_sequence_set(uint32_t seq_id, int64_t value) noexcept
 {
 	struct sequence *seq = sequence_cache_find(seq_id);
 	if (seq == NULL)
@@ -1430,7 +1430,7 @@ box_sequence_set(uint32_t seq_id, int64_t value)
 }
 
 int
-box_sequence_reset(uint32_t seq_id)
+box_sequence_reset(uint32_t seq_id) noexcept
 {
 	struct sequence *seq = sequence_cache_find(seq_id);
 	if (seq == NULL)

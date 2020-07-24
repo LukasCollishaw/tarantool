@@ -401,7 +401,7 @@ fiber_call_impl(struct fiber *callee)
 	ASAN_START_SWITCH_FIBER(asan_state, 1,
 				callee->stack,
 				callee->stack_size);
-	coro_transfer(&caller->ctx, &callee->ctx);
+	coro_transfer((*&caller->ctx), (*&callee->ctx));
 	ASAN_FINISH_SWITCH_FIBER(asan_state);
 }
 
@@ -655,7 +655,7 @@ fiber_yield(void)
 				(caller->flags & FIBER_IS_DEAD) == 0,
 				callee->stack,
 				callee->stack_size);
-	coro_transfer(&caller->ctx, &callee->ctx);
+	coro_transfer((*&caller->ctx), (*&callee->ctx));
 	ASAN_FINISH_SWITCH_FIBER(asan_state);
 }
 
@@ -1176,7 +1176,7 @@ fiber_new_ex(const char *name, const struct fiber_attr *fiber_attr,
 			mempool_free(&cord->fiber_mempool, fiber);
 			return NULL;
 		}
-		coro_create(&fiber->ctx, fiber_loop, NULL,
+		coro_create((*&fiber->ctx), fiber_loop, NULL,
 			    fiber->stack, fiber->stack_size);
 
 		region_create(&fiber->gc, &cord->slabc);

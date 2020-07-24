@@ -412,7 +412,7 @@ struct lua_State;
 struct ipc_wait_pad;
 
 struct fiber {
-	coro_context ctx;
+	struct coro_context *ctx;
 	/** Coro stack slab. */
 	struct slab *stack_slab;
 	/** Coro stack addr. */
